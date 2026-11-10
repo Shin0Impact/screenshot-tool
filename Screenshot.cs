@@ -307,7 +307,7 @@ namespace ScreenshotTool
     class MenuColors : ProfessionalColorTable
     {
         public static Color Back() { return Theme.Light ? Color.FromArgb(249, 249, 249) : Color.FromArgb(43, 43, 43); }
-        private static Color Hot() { return Theme.Light ? Color.FromArgb(229, 229, 229) : Color.FromArgb(70, 70, 70); }
+        public static Color Hot() { return Theme.Light ? Color.FromArgb(229, 229, 229) : Color.FromArgb(70, 70, 70); }
         private static Color Line() { return Theme.Light ? Color.FromArgb(205, 205, 205) : Color.FromArgb(72, 72, 72); }
 
         public override Color ToolStripDropDownBackground { get { return Back(); } }
@@ -327,6 +327,42 @@ namespace ScreenshotTool
         public override Color CheckBackground { get { return Hot(); } }
         public override Color CheckSelectedBackground { get { return Hot(); } }
         public override Color CheckPressedBackground { get { return Hot(); } }
+    }
+
+    // Tray menu look: rounded hover highlight and a plain check mark instead of a boxed one.
+    class CleanRenderer : ToolStripProfessionalRenderer
+    {
+        public CleanRenderer() : base(new MenuColors()) { }
+
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            if (!e.Item.Enabled || (!e.Item.Selected && !e.Item.Pressed)) return;
+            Rectangle r = new Rectangle(4, 1, e.Item.Width - 8, e.Item.Height - 2);
+            SmoothingMode old = e.Graphics.SmoothingMode;
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath gp = SelectionForm.RoundedRectPath(r, 5))
+            using (SolidBrush b = new SolidBrush(MenuColors.Hot()))
+                e.Graphics.FillPath(b, gp);
+            e.Graphics.SmoothingMode = old;
+        }
+
+        protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
+        {
+            Rectangle r = e.ImageRectangle;
+            int cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+            Color fg = Theme.Light ? Color.FromArgb(25, 25, 25) : Color.FromArgb(240, 240, 240);
+            SmoothingMode old = e.Graphics.SmoothingMode;
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (Pen p = new Pen(fg, 1.8f))
+            {
+                p.StartCap = LineCap.Round;
+                p.EndCap = LineCap.Round;
+                p.LineJoin = LineJoin.Round;
+                e.Graphics.DrawLines(p, new PointF[] {
+                    new PointF(cx - 4.5f, cy + 0.5f), new PointF(cx - 1.5f, cy + 3.5f), new PointF(cx + 4.5f, cy - 3.5f) });
+            }
+            e.Graphics.SmoothingMode = old;
+        }
     }
 
     // Neutral colours that follow the Windows light/dark setting.
@@ -1866,6 +1902,41 @@ namespace ScreenshotTool
             return p;
         }
 
+        private Bitmap acrylic;
+        private Rectangle acrylicFor;
+
+        // The area behind the toolbar from the untouched screenshot, blurred (shrunk, then stretched back).
+        private void EnsureAcrylic()
+        {
+            if (acrylic != null && acrylicFor == toolbarRect) return;
+            if (acrylic != null) { acrylic.Dispose(); acrylic = null; }
+            acrylicFor = toolbarRect;
+            Rectangle r = Rectangle.Intersect(toolbarRect, new Rectangle(0, 0, shot.Width, shot.Height));
+            if (r.Width < 4 || r.Height < 4) return;
+            try
+            {
+                Bitmap result = new Bitmap(toolbarRect.Width, toolbarRect.Height, PixelFormat.Format32bppArgb);
+                int sw = Math.Max(2, r.Width / 14), sh = Math.Max(2, r.Height / 14);
+                using (Bitmap small = new Bitmap(sw, sh, PixelFormat.Format32bppArgb))
+                {
+                    using (Graphics sg = Graphics.FromImage(small))
+                    {
+                        sg.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        sg.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        sg.DrawImage(shot, new Rectangle(0, 0, sw, sh), r.X, r.Y, r.Width, r.Height, GraphicsUnit.Pixel);
+                    }
+                    using (Graphics rg = Graphics.FromImage(result))
+                    {
+                        rg.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                        rg.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        rg.DrawImage(small, new Rectangle(r.X - toolbarRect.X, r.Y - toolbarRect.Y, r.Width, r.Height));
+                    }
+                }
+                acrylic = result;
+            }
+            catch (Exception) { acrylic = null; }
+        }
+
         private void DrawToolbar(Graphics g, Rectangle clip)
         {
             if (!toolbarRect.IntersectsWith(clip)) return;
@@ -1873,12 +1944,18 @@ namespace ScreenshotTool
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
+            EnsureAcrylic();
             using (GraphicsPath gp = RoundedRect(toolbarRect, (int)(12 * scale)))
-            using (SolidBrush bg = new SolidBrush(Theme.Bar))
-            using (Pen border = new Pen(Theme.BarBorder, 1f))
             {
-                g.FillPath(bg, gp);
-                g.DrawPath(border, gp);
+                // Frosted look: the blurred desktop behind the bar, a matte tint on top, a soft edge.
+                GraphicsState st = g.Save();
+                g.SetClip(gp, CombineMode.Intersect);
+                if (acrylic != null) g.DrawImage(acrylic, toolbarRect);
+                using (SolidBrush tint = new SolidBrush(Theme.Light ? Color.FromArgb(150, 244, 244, 246) : Color.FromArgb(168, 22, 26, 34)))
+                    g.FillRectangle(tint, toolbarRect);
+                g.Restore(st);
+                using (Pen border = new Pen(Theme.Light ? Color.FromArgb(60, 0, 0, 0) : Color.FromArgb(60, 255, 255, 255), 1f))
+                    g.DrawPath(border, gp);
             }
 
             foreach (ToolbarButton b in buttons)
@@ -1928,6 +2005,7 @@ namespace ScreenshotTool
                 labelFont.Dispose();
                 textFormat.Dispose();
                 dimmed.Dispose();
+                if (acrylic != null) acrylic.Dispose();
             }
             base.Dispose(disposing);
         }
@@ -2075,6 +2153,7 @@ namespace ScreenshotTool
                 };
                 tolItem.DropDownItems.Add(item);
             }
+            tolItem.DropDownDirection = ToolStripDropDownDirection.Right;
             menu.Items.Add(tolItem);
 
             menu.Items.Add(new ToolStripSeparator());
@@ -2860,7 +2939,7 @@ namespace ScreenshotTool
         private static void ApplyMenuTheme(ContextMenuStrip menu)
         {
             Theme.Refresh();
-            menu.Renderer = new ToolStripProfessionalRenderer(new MenuColors());
+            menu.Renderer = new CleanRenderer();
             Color bg = MenuColors.Back();
             Color fg = Theme.Light ? Color.FromArgb(25, 25, 25) : Color.FromArgb(240, 240, 240);
             menu.BackColor = bg;
