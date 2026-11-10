@@ -90,6 +90,15 @@ namespace ScreenshotTool
             public uint time; public int ptX; public int ptY;
         }
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("kernel32.dll")]
+        public static extern bool CloseHandle(IntPtr h);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        public static extern bool GetTokenInformation(IntPtr token, int cls, out int info, int len, out int ret);
+
         [DllImport("user32.dll")]
         public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
         [DllImport("user32.dll")]
@@ -1378,6 +1387,8 @@ namespace ScreenshotTool
         private readonly Native.LowLevelKeyboardProc hookProc;
         private IntPtr hookHandle = IntPtr.Zero;
         private Thread hookThread;
+        private readonly System.Windows.Forms.Timer fgTimer = new System.Windows.Forms.Timer();
+        private uint lastFgPid;
         private uint hookThreadId;
         private bool busy;
         private bool swallowKeyUp;
@@ -1465,7 +1476,12 @@ namespace ScreenshotTool
 
             hookProc = HookCallback;
             StartHookThread();
-            Log("started; hook handle = " + hookHandle);
+            Log("started; hook handle = " + hookHandle + ", this app elevated = " + IsElevated((uint)Process.GetCurrentProcess().Id));
+            // Log which program is in front (and whether it runs as administrator). A hook cannot see
+            // keys typed into an elevated window, which is the usual reason hotkeys "do nothing" there.
+            fgTimer.Interval = 1000;
+            fgTimer.Tick += delegate { TrackForeground(); };
+            fgTimer.Start();
             sync.BeginInvoke(new Action(WarmUp));
             if (hookHandle == IntPtr.Zero)
             {
@@ -1475,6 +1491,43 @@ namespace ScreenshotTool
         }
 
         // ---- keyboard hook -------------------------------------------------------------
+
+        // 1 = elevated, 0 = not elevated, -1 = could not tell (access denied: protected or higher integrity).
+        private static int IsElevated(uint pid)
+        {
+            IntPtr h = Native.OpenProcess(0x1000, false, pid);   // PROCESS_QUERY_LIMITED_INFORMATION
+            if (h == IntPtr.Zero) return -1;
+            try
+            {
+                IntPtr tok;
+                if (!Native.OpenProcessToken(h, 0x0008, out tok)) return -1;   // TOKEN_QUERY
+                try
+                {
+                    int elev, ret;
+                    if (!Native.GetTokenInformation(tok, 20, out elev, 4, out ret)) return -1;   // TokenElevation
+                    return elev != 0 ? 1 : 0;
+                }
+                finally { Native.CloseHandle(tok); }
+            }
+            finally { Native.CloseHandle(h); }
+        }
+
+        private void TrackForeground()
+        {
+            try
+            {
+                IntPtr fg = Native.GetForegroundWindow();
+                if (fg == IntPtr.Zero) return;
+                uint pid;
+                Native.GetWindowThreadProcessId(fg, out pid);
+                if (pid == lastFgPid) return;
+                lastFgPid = pid;
+                string name = "?";
+                try { using (Process fp = Process.GetProcessById((int)pid)) name = fp.ProcessName; } catch (Exception) { }
+                Log("foreground: " + name + " (pid " + pid + "), elevated = " + IsElevated(pid));
+            }
+            catch (Exception) { }
+        }
 
         // The hook lives on its own thread with its own message loop. A low-level hook that sits on
         // the UI thread is silently dropped by Windows whenever that thread is busy for too long
@@ -1948,6 +2001,17 @@ namespace ScreenshotTool
                 string pname = "?";
                 try { using (Process fp = Process.GetProcessById((int)fpid)) pname = fp.ProcessName; } catch (Exception) { }
                 Log("foreground before overlay: " + pname + " class=" + fcls + " rect=" + Native.ToRectangle(fr));
+            }
+            catch (Exception) { }
+
+            // If Windows' own snipping overlay opened too, close it so ours is the only one.
+            try
+            {
+                foreach (Process sp in Process.GetProcessesByName("ScreenClippingHost"))
+                {
+                    try { sp.Kill(); Log("closed Windows' ScreenClippingHost"); } catch (Exception) { }
+                    sp.Dispose();
+                }
             }
             catch (Exception) { }
 
