@@ -2511,8 +2511,10 @@ namespace ScreenshotTool
             if (MessageBox.Show(question, "Screenshot", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
 
             string link = url.Groups[1].Value;
-            string tmpDir = Path.Combine(Path.GetTempPath(), "ScreenshotUpdate");
-            try { if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, true); } catch (Exception) { }
+            // A previous installer may still be running from here (its file is locked), so every download gets its own folder.
+            string tmpRoot = Path.Combine(Path.GetTempPath(), "ScreenshotUpdate");
+            try { if (Directory.Exists(tmpRoot)) foreach (string old in Directory.GetDirectories(tmpRoot)) { try { Directory.Delete(old, true); } catch (Exception) { } } } catch (Exception) { }
+            string tmpDir = Path.Combine(tmpRoot, Guid.NewGuid().ToString("N").Substring(0, 8));
             try { Directory.CreateDirectory(tmpDir); } catch (Exception) { }
             string target = Path.Combine(tmpDir, "Screenshot-Installer.exe");
             try { tray.ShowBalloonTip(3000, "Screenshot", "Downloading the update...", ToolTipIcon.Info); } catch (Exception) { }
