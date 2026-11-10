@@ -3129,11 +3129,10 @@ namespace ScreenshotTool
             {
                 Diag.Log("overlay prepared in " + ov.ElapsedMilliseconds + " ms (" + windows.Count + " windows), showing");
                 openOverlay = form;
-                SelectionForm shownForm = form;
                 form.Shown += delegate
                 {
-                    // every queued press gets its own fresh overlay
-                    if (pendingPresses > 0) { pendingPresses--; Diag.Log("queued press taken: " + pendingPresses + " left"); shownForm.RestartFresh(); }
+                    // presses that came in while this overlay was being prepared are served by it: it is already fresh
+                    if (pendingPresses > 0) { Diag.Log("presses folded into this overlay: " + pendingPresses); pendingPresses = 0; }
                 };
                 try { form.ShowDialog(); }
                 finally { openOverlay = null; }
