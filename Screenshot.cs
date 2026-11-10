@@ -2304,6 +2304,7 @@ namespace ScreenshotTool
             hookProc = HookCallback;
             StartHookThread();
             CleanOldLogs();
+            MigrateStartup();
             sync.BeginInvoke(new Action(WarmUp));
             if (hookHandle == IntPtr.Zero)
             {
@@ -3104,9 +3105,46 @@ namespace ScreenshotTool
             catch (Exception) { return -1; }
         }
 
+        private static bool RunKeySet()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKeyPath))
+                    return k != null && k.GetValue(RunValueName) != null;
+            }
+            catch (Exception) { return false; }
+        }
+
+        private static void SetRunKey(bool on)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(RunKeyPath))
+                {
+                    if (on) k.SetValue(RunValueName, "\"" + Application.ExecutablePath + "\"");
+                    else k.DeleteValue(RunValueName, false);
+                }
+            }
+            catch (Exception) { }
+        }
+
         private static bool IsStartupEnabled()
         {
-            return RunSchtasks("/Query /TN " + TaskName) == 0;
+            return RunKeySet() || RunSchtasks("/Query /TN " + TaskName) == 0;
+        }
+
+        // Older installs started at logon through a scheduled task, which cannot launch a UIAccess program.
+        // Move them to the Run entry (started by the shell, like a double-click).
+        private static void MigrateStartup()
+        {
+            try
+            {
+                if (HasUiAccess((uint)Process.GetCurrentProcess().Id) != 1) return;
+                if (RunSchtasks("/Query /TN " + TaskName) != 0) return;
+                SetRunKey(true);
+                RunSchtasks("/Delete /TN " + TaskName + " /F");
+            }
+            catch (Exception) { }
         }
 
         private static string XmlEscape(string t)
@@ -3121,6 +3159,11 @@ namespace ScreenshotTool
                 if (IsStartupEnabled())
                 {
                     RunSchtasks("/Delete /TN " + TaskName + " /F");
+                    SetRunKey(false);
+                }
+                else if (IsElevated((uint)Process.GetCurrentProcess().Id) != 1)
+                {
+                    SetRunKey(true);   // started by the shell at logon (works for the UIAccess build too)
                 }
                 else
                 {
@@ -3477,7 +3520,6 @@ try {
   Set-ItemProperty $key NoModify 1 -Type DWord
   Set-ItemProperty $key NoRepair 1 -Type DWord
   Unregister-ScheduledTask -TaskName 'ScreenshotTool' -Confirm:$false -ErrorAction SilentlyContinue
-  Register-ScheduledTask -TaskName 'ScreenshotTool' -Action (New-ScheduledTaskAction -Execute $target) -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $user) -Principal (New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited) -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)) | Out-Null
   Write-Output 'OK'
 } catch {
   Write-Output ('FAILED: ' + $_.Exception.Message)
@@ -3831,6 +3873,15 @@ Write-Output 'OK'
                 else if (rc != 0) ok = false;
             }
             if (!cancelled && userDir != null) UninstallUser(userDir);
+            if (!cancelled)
+            {
+                try
+                {
+                    using (RegistryKey r = Registry.CurrentUser.OpenSubKey(RunPath, true))
+                        if (r != null) r.DeleteValue("ScreenshotTool", false);
+                }
+                catch (Exception) { }
+            }
 
             MessageBox.Show(cancelled ? "Nothing was removed (Windows permission was declined)."
                 : ok ? "Screenshot was removed." : "Could not remove everything.",
@@ -3952,6 +4003,13 @@ Write-Output 'OK'
                         try { File.Delete(SetupLog); } catch (Exception) { }
                         string u = UserDir();
                         if (u != null) UninstallUser(u);   // moved to the administrator install
+                        // Start at logon through the shell (Run key): a scheduled task cannot start a UIAccess program.
+                        try
+                        {
+                            using (RegistryKey r = Registry.CurrentUser.CreateSubKey(RunPath))
+                                r.SetValue("ScreenshotTool", "\"" + Path.Combine(aDir, "Screenshot.exe") + "\"");
+                        }
+                        catch (Exception) { }
                         if (StartApp(aDir)) return false;
                         MessageBox.Show("Installed, but could not start it. Try again from the installer.",
                             "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
