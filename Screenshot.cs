@@ -2452,7 +2452,10 @@ namespace ScreenshotTool
             if (MessageBox.Show(question, "Screenshot", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
 
             string link = url.Groups[1].Value;
-            string target = Path.Combine(Path.GetTempPath(), "Screenshot-Installer.exe");
+            string tmpDir = Path.Combine(Path.GetTempPath(), "ScreenshotUpdate");
+            try { if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, true); } catch (Exception) { }
+            try { Directory.CreateDirectory(tmpDir); } catch (Exception) { }
+            string target = Path.Combine(tmpDir, "Screenshot-Installer.exe");
             try { tray.ShowBalloonTip(3000, "Screenshot", "Downloading the update...", ToolTipIcon.Info); } catch (Exception) { }
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -2466,7 +2469,11 @@ namespace ScreenshotTool
                         wc.DownloadFile(link, target);
                     }
                 }
-                catch (Exception ex) { dlErr = ex.Message; }
+                catch (Exception ex)
+                {
+                    dlErr = ex.Message;
+                    for (Exception inner = ex.InnerException; inner != null; inner = inner.InnerException) dlErr += "\r\n" + inner.Message;
+                }
                 sync.BeginInvoke(new Action(delegate
                 {
                     if (dlErr != null)
