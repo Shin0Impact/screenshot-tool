@@ -76,7 +76,7 @@ only starts one that is signed with a trusted certificate and installed in Progr
    elevated.
 3. From then on, double-clicking `Screenshot.exe` just starts the installed copy. A newer
    `Screenshot.exe` updates it the same way (one prompt again).
-4. `Screenshot.exe --uninstall` removes the app, the startup task and the certificate.
+4. To remove it: Settings > Apps > "Screenshot", the tray menu's "Uninstall...", or `Uninstall.exe` in the install folder. It removes the app, the startup task and the certificate.
 
 Choosing *No* at the first prompt runs the app without the setup: everything works except over
 administrator windows. The app writes no logs.

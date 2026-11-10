@@ -2077,6 +2077,22 @@ namespace ScreenshotTool
                 }
             };
             menu.Items.Add(new ToolStripSeparator());
+            string uninstaller = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Uninstall.exe");
+            if (File.Exists(uninstaller))
+            {
+                menu.Items.Add("Uninstall...", null, delegate
+                {
+                    if (MessageBox.Show("Remove Screenshot from this computer?", "Screenshot",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                    try
+                    {
+                        ProcessStartInfo u = new ProcessStartInfo(uninstaller, "--uninstall");
+                        u.UseShellExecute = true;
+                        Process.Start(u);
+                    }
+                    catch (Exception) { }
+                });
+            }
             menu.Items.Add("Exit", null, delegate { ExitThread(); });
 
             tray = new NotifyIcon();
@@ -3017,7 +3033,7 @@ namespace ScreenshotTool
                 string script = @"
 $ErrorActionPreference = 'Stop'
 try {
-  $src = '__SRC__'; $dir = '__DIR__'; $ver = '__VER__'; $user = '__USER__'
+  $src = '__SRC__'; $dir = '__DIR__'; $ver = '__VER__'; $user = '__USER__'; $launcher = '__LAUNCHER__'
   $subject = 'CN=Screenshot Tool (local)'
   $target = Join-Path $dir 'Screenshot.exe'
   $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -eq $subject -and $_.NotAfter -gt (Get-Date).AddDays(30) } | Select-Object -First 1
@@ -3032,6 +3048,18 @@ try {
   $sig = Set-AuthenticodeSignature -FilePath $target -Certificate $cert -HashAlgorithm SHA256
   if ($sig.Status -ne 'Valid') { throw ('Signing failed: ' + $sig.Status + ' ' + $sig.StatusMessage) }
   Set-Content -Path (Join-Path $dir 'version.txt') -Value $ver -Encoding Ascii
+  $unin = Join-Path $dir 'Uninstall.exe'
+  Copy-Item $launcher $unin -Force
+  $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ScreenshotTool'
+  New-Item -Path $key -Force | Out-Null
+  Set-ItemProperty $key DisplayName 'Screenshot'
+  Set-ItemProperty $key Publisher 'Shin0Impact'
+  Set-ItemProperty $key DisplayVersion $ver
+  Set-ItemProperty $key DisplayIcon $target
+  Set-ItemProperty $key InstallLocation $dir
+  Set-ItemProperty $key UninstallString ('""' + $unin + '"" --uninstall')
+  Set-ItemProperty $key NoModify 1 -Type DWord
+  Set-ItemProperty $key NoRepair 1 -Type DWord
   Unregister-ScheduledTask -TaskName 'ScreenshotTool' -Confirm:$false -ErrorAction SilentlyContinue
   Register-ScheduledTask -TaskName 'ScreenshotTool' -Action (New-ScheduledTaskAction -Execute $target) -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $user) -Principal (New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited) -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)) | Out-Null
   Write-Output 'OK'
@@ -3039,7 +3067,7 @@ try {
   Write-Output ('FAILED: ' + $_.Exception.Message)
   exit 1
 }
-".Replace("__SRC__", Q(tmp)).Replace("__DIR__", Q(InstallDir)).Replace("__VER__", Q(version)).Replace("__USER__", Q(user));
+".Replace("__SRC__", Q(tmp)).Replace("__DIR__", Q(InstallDir)).Replace("__VER__", Q(version)).Replace("__USER__", Q(user)).Replace("__LAUNCHER__", Q(Application.ExecutablePath));
                 code = RunPowerShell(script, out output);
             }
             catch (Exception ex)
@@ -3065,6 +3093,7 @@ try {
 $ErrorActionPreference = 'Continue'
 $subject = 'CN=Screenshot Tool (local)'
 Unregister-ScheduledTask -TaskName 'ScreenshotTool' -Confirm:$false -ErrorAction SilentlyContinue
+Remove-Item 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ScreenshotTool' -Recurse -Force -ErrorAction SilentlyContinue
 if (Test-Path '__DIR__') { Remove-Item '__DIR__' -Recurse -Force }
 foreach ($store in 'Cert:\LocalMachine\My', 'Cert:\LocalMachine\Root', 'Cert:\LocalMachine\TrustedPublisher') {
   Get-ChildItem $store | Where-Object { $_.Subject -eq $subject } | Remove-Item -Force
@@ -3117,10 +3146,41 @@ Write-Output 'OK'
             Application.EnableVisualStyles();
             if (cmd == "--uninstall")
             {
+                string self = Application.ExecutablePath;
+                string copy = Path.Combine(Path.GetTempPath(), "ScreenUninstall.exe");
+                if (self.StartsWith(InstallDir, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Running from the folder that is about to be deleted: continue from a temporary copy.
+                    try
+                    {
+                        File.Copy(self, copy, true);
+                        ProcessStartInfo again = new ProcessStartInfo(copy, "--uninstall");
+                        again.UseShellExecute = true;
+                        Process.Start(again);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("Could not start the uninstaller:\r\n" + ex.Message, "Screenshot",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                    return false;
+                }
                 int rc = RunElevated("--uninstall-elevated");
                 try { File.Delete(SetupLog); } catch (Exception) { }
                 MessageBox.Show(rc == 0 ? "Screenshot was removed." : "Could not remove it.",
                     "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (string.Equals(self, copy, StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        ProcessStartInfo del = new ProcessStartInfo("cmd.exe",
+                            "/c ping -n 3 127.0.0.1 >nul & del \"" + copy + "\"");
+                        del.CreateNoWindow = true;
+                        del.UseShellExecute = false;
+                        Process.Start(del);
+                    }
+                    catch (Exception) { }
+                }
                 return false;
             }
 
