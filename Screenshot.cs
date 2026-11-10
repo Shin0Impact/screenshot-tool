@@ -205,7 +205,7 @@ namespace ScreenshotTool
         public static bool SaveFile = true;        // write a PNG file
         public static bool CopyClipboard = true;   // put the shot on the clipboard
         public static bool Adjust = true;          // let the selection be adjusted before capturing
-        public static bool WindowModeLast;         // last overlay mode: false = region, true = window
+        public static int LastMode;                // last overlay mode: 0 = region, 1 = window, 2 = monitor
         public static int ClickTolerance = 12;     // px the mouse may move and still count as a click
 
         public static void Load()
@@ -218,7 +218,9 @@ namespace ScreenshotTool
                     SaveFile = GetBool(k, "SaveFile", true);
                     CopyClipboard = GetBool(k, "CopyClipboard", true);
                     Adjust = GetBool(k, "Adjust", true);
-                    WindowModeLast = GetBool(k, "WindowModeLast", false);
+                    object lm = k.GetValue("LastMode");
+                    if (lm is int && (int)lm >= 0 && (int)lm <= 2) LastMode = (int)lm;
+                    else if (GetBool(k, "WindowModeLast", false)) LastMode = 1;
                     object v = k.GetValue("ClickTolerance");
                     if (v is int && (int)v >= 0 && (int)v <= 200) ClickTolerance = (int)v;
                     if (!SaveFile && !CopyClipboard) CopyClipboard = true;
@@ -243,7 +245,7 @@ namespace ScreenshotTool
                     k.SetValue("SaveFile", SaveFile ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("CopyClipboard", CopyClipboard ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("Adjust", Adjust ? 1 : 0, RegistryValueKind.DWord);
-                    k.SetValue("WindowModeLast", WindowModeLast ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("LastMode", LastMode, RegistryValueKind.DWord);
                     k.SetValue("ClickTolerance", ClickTolerance, RegistryValueKind.DWord);
                 }
             }
@@ -266,6 +268,62 @@ namespace ScreenshotTool
         }
     }
 
+    // Neutral colours that follow the Windows light/dark setting.
+    static class Theme
+    {
+        public static bool Light;
+        public static Color Bar, BarBorder, Text, Muted, OnFill, OnText, Hover, Accent, AccentText;
+
+        private static bool ReadFlag(string name)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", false))
+                {
+                    if (k != null)
+                    {
+                        object v = k.GetValue(name);
+                        if (v is int) return ((int)v) != 0;
+                    }
+                }
+            }
+            catch (Exception) { }
+            return false;   // default: dark
+        }
+
+        public static bool TaskbarLight { get { return ReadFlag("SystemUsesLightTheme"); } }
+
+        public static void Refresh()
+        {
+            Light = ReadFlag("AppsUseLightTheme");
+            if (Light)
+            {
+                Bar = Color.FromArgb(246, 243, 243, 243);
+                BarBorder = Color.FromArgb(70, 0, 0, 0);
+                Text = Color.FromArgb(255, 32, 32, 32);
+                Muted = Color.FromArgb(255, 110, 110, 110);
+                OnFill = Color.FromArgb(255, 40, 40, 40);
+                OnText = Color.White;
+                Hover = Color.FromArgb(40, 0, 0, 0);
+                Accent = Color.FromArgb(255, 40, 40, 40);
+                AccentText = Color.White;
+            }
+            else
+            {
+                Bar = Color.FromArgb(244, 32, 32, 32);
+                BarBorder = Color.FromArgb(80, 255, 255, 255);
+                Text = Color.White;
+                Muted = Color.FromArgb(255, 160, 160, 160);
+                OnFill = Color.FromArgb(255, 235, 235, 235);
+                OnText = Color.FromArgb(255, 25, 25, 25);
+                Hover = Color.FromArgb(55, 255, 255, 255);
+                Accent = Color.FromArgb(255, 235, 235, 235);
+                AccentText = Color.FromArgb(255, 25, 25, 25);
+            }
+        }
+    }
+
     enum OverlayOutcome { Cancelled, Rect, AllMonitors, DelayRestart }
 
     class OverlayResult
@@ -273,7 +331,7 @@ namespace ScreenshotTool
         public Bitmap Image;
         public bool Restart;
         public int RestartDelay;
-        public bool RestartWindowMode;
+        public int RestartMode;
     }
 
     class ToolbarButton
@@ -304,7 +362,10 @@ namespace ScreenshotTool
         private Rectangle toolbarRect;
         private ToolbarButton hoverButton;
 
-        private bool windowMode;
+        private int mode;            // 0 = region, 1 = pick a window, 2 = pick a monitor
+        private bool windowMode { get { return mode != 0; } }   // hover-pick modes
+        private readonly List<Rectangle> monitors;  // screen coordinates
+        private bool clickedAway;    // this press only deselected an existing selection
         private bool dragging;       // drawing a new selection
         private bool exceeded;       // pointer left the click-tolerance zone during this drag
         private Point start;
@@ -318,15 +379,18 @@ namespace ScreenshotTool
         public OverlayOutcome Outcome = OverlayOutcome.Cancelled;
         public Rectangle Result = Rectangle.Empty;   // bitmap pixels
         public int DelaySeconds;
-        public bool RestartInWindowMode;
+        public int RestartMode;
+        public string CloseReason = "";
 
         public SelectionForm(Bitmap desktopShot, Rectangle screenBounds, List<Rectangle> windowRects,
-            Rectangle toolbarMonitorScreen, bool startInWindowMode)
+            List<Rectangle> monitorRects, Rectangle toolbarMonitorScreen, int startMode)
         {
+            Theme.Refresh();
+            monitors = monitorRects;
             shot = desktopShot;
             bounds = screenBounds;
             windows = windowRects;
-            windowMode = startInWindowMode;
+            mode = startMode;
             monitorClient = new Rectangle(toolbarMonitorScreen.X - screenBounds.X,
                 toolbarMonitorScreen.Y - screenBounds.Y, toolbarMonitorScreen.Width, toolbarMonitorScreen.Height);
             scale = MonitorScale(toolbarMonitorScreen);
@@ -425,9 +489,9 @@ namespace ScreenshotTool
 
         private void BuildToolbar()
         {
-            AddButton("Region", delegate { return !windowMode; }, delegate { SetWindowMode(false); });
-            AddButton("Window", delegate { return windowMode; }, delegate { SetWindowMode(true); });
-            AddButton("Monitor", null, delegate { FinishRect(monitorClient); });
+            AddButton("Region", delegate { return mode == 0; }, delegate { SetMode(0); });
+            AddButton("Window", delegate { return mode == 1; }, delegate { SetMode(1); });
+            AddButton("Monitor", delegate { return mode == 2; }, delegate { SetMode(2); });
             AddButton("All monitors", null, delegate { Outcome = OverlayOutcome.AllMonitors; Close(); });
             AddSeparator();
             AddLabel("Delay");
@@ -440,7 +504,7 @@ namespace ScreenshotTool
             AddButton("Save", delegate { return Settings.SaveFile; }, delegate { Settings.ToggleSave(); });
             AddButton("Copy", delegate { return Settings.CopyClipboard; }, delegate { Settings.ToggleCopy(); });
             AddSeparator();
-            AddButton("X", null, delegate { Outcome = OverlayOutcome.Cancelled; Close(); });
+            AddButton("X", null, delegate { Cancel("X button"); });
 
             int pad = (int)(14 * scale);
             int btnH = (int)(36 * scale);
@@ -512,7 +576,7 @@ namespace ScreenshotTool
         {
             Outcome = OverlayOutcome.DelayRestart;
             DelaySeconds = seconds;
-            RestartInWindowMode = windowMode;
+            RestartMode = mode;
             Close();
         }
 
@@ -521,11 +585,18 @@ namespace ScreenshotTool
             if (hasSelection) FinishRect(sel);
         }
 
-        private void SetWindowMode(bool value)
+        private void Cancel(string why)
         {
-            if (windowMode == value) return;
-            windowMode = value;
-            Settings.WindowModeLast = value;
+            CloseReason = why;
+            Outcome = OverlayOutcome.Cancelled;
+            Close();
+        }
+
+        private void SetMode(int value)
+        {
+            if (mode == value) return;
+            mode = value;
+            Settings.LastMode = value;
             Settings.Save();
 
             Rectangle old = sel;
@@ -581,8 +652,7 @@ namespace ScreenshotTool
 
             if (key == Keys.Escape)
             {
-                Outcome = OverlayOutcome.Cancelled;
-                Close();
+                Cancel("Esc");
                 return true;
             }
 
@@ -638,11 +708,12 @@ namespace ScreenshotTool
 
         private void UpdateHover(Point p)
         {
-            if (windows == null || toolbarRect.Contains(p)) return;
+            List<Rectangle> candidates = (mode == 2) ? monitors : windows;
+            if (candidates == null || toolbarRect.Contains(p)) return;
             Rectangle found = Rectangle.Empty;
             int sx = p.X + bounds.X;
             int sy = p.Y + bounds.Y;
-            foreach (Rectangle w in windows)
+            foreach (Rectangle w in candidates)
             {
                 if (w.Contains(sx, sy)) { found = w; break; }
             }
@@ -790,8 +861,7 @@ namespace ScreenshotTool
                 }
                 else
                 {
-                    Outcome = OverlayOutcome.Cancelled;
-                    Close();
+                    Cancel("right-click");
                 }
                 return;
             }
@@ -801,6 +871,7 @@ namespace ScreenshotTool
                 return;
             }
 
+            clickedAway = false;
             if (toolbarRect.Contains(pt))
             {
                 ToolbarButton b = HitButton(pt);
@@ -840,7 +911,8 @@ namespace ScreenshotTool
                     dragOrigPoint = pt;
                     return;
                 }
-                // click elsewhere: start over with a fresh selection
+                // click elsewhere: start over with a fresh selection (a bare click only deselects)
+                clickedAway = true;
                 Rectangle prev = sel;
                 hasSelection = false;
                 sel = Rectangle.Empty;
@@ -931,11 +1003,16 @@ namespace ScreenshotTool
                         FinishRect(sel);
                     }
                 }
+                else if (clickedAway)
+                {
+                    TrayApp.WriteLog("click outside selection: deselected only");
+                }
                 else
                 {
                     // A click (pointer stayed inside the tolerance zone) selects the whole monitor.
                     FinishRect(MonitorAt(e.Location));
                 }
+                clickedAway = false;
                 return;
             }
             base.OnMouseUp(e);
@@ -1005,7 +1082,7 @@ namespace ScreenshotTool
                 }
 
                 float bw = windowMode ? Math.Max(3f, 3f * scale) : Math.Max(1f, scale);
-                using (Pen p = new Pen(Color.FromArgb(255, 0, 160, 255), bw))
+                using (Pen p = new Pen(Color.White, bw))
                 {
                     g.DrawRectangle(p, sel.X, sel.Y, sel.Width - 1, sel.Height - 1);
                 }
@@ -1022,7 +1099,7 @@ namespace ScreenshotTool
         {
             Rectangle[] hr = HandleRects();
             using (SolidBrush fill = new SolidBrush(Color.White))
-            using (Pen border = new Pen(Color.FromArgb(255, 0, 120, 215), 1f))
+            using (Pen border = new Pen(Color.FromArgb(255, 110, 110, 110), 1f))
             {
                 foreach (Rectangle r in hr)
                 {
@@ -1053,12 +1130,15 @@ namespace ScreenshotTool
             SmoothingMode oldSm = g.SmoothingMode;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using (GraphicsPath gp = RoundedRect(r, (int)(8 * scale)))
-            using (SolidBrush bg = new SolidBrush(Color.FromArgb(255, 0, 120, 215)))
+            using (SolidBrush bg = new SolidBrush(Theme.Accent))
             {
                 g.FillPath(bg, gp);
             }
             g.SmoothingMode = oldSm;
-            g.DrawString("Capture  (Enter)", uiFont, Brushes.White, r, textFormat);
+            using (SolidBrush tb = new SolidBrush(Theme.AccentText))
+            {
+                g.DrawString("Capture  (Enter)", uiFont, tb, r, textFormat);
+            }
         }
 
         private static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -1081,8 +1161,8 @@ namespace ScreenshotTool
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
             using (GraphicsPath gp = RoundedRect(toolbarRect, (int)(12 * scale)))
-            using (SolidBrush bg = new SolidBrush(Color.FromArgb(240, 36, 36, 36)))
-            using (Pen border = new Pen(Color.FromArgb(90, 255, 255, 255), 1f))
+            using (SolidBrush bg = new SolidBrush(Theme.Bar))
+            using (Pen border = new Pen(Theme.BarBorder, 1f))
             {
                 g.FillPath(bg, gp);
                 g.DrawPath(border, gp);
@@ -1092,7 +1172,7 @@ namespace ScreenshotTool
             {
                 if (b.IsSeparator)
                 {
-                    using (Pen sp = new Pen(Color.FromArgb(90, 255, 255, 255), 1f))
+                    using (Pen sp = new Pen(Theme.BarBorder, 1f))
                     {
                         int x = b.Rect.X + b.Rect.Width / 2;
                         int m = (int)(6 * scale);
@@ -1102,7 +1182,7 @@ namespace ScreenshotTool
                 }
                 if (b.IsLabel)
                 {
-                    using (SolidBrush lb = new SolidBrush(Color.FromArgb(255, 170, 170, 170)))
+                    using (SolidBrush lb = new SolidBrush(Theme.Muted))
                     {
                         g.DrawString(b.Text, uiFont, lb, b.Rect, textFormat);
                     }
@@ -1112,14 +1192,17 @@ namespace ScreenshotTool
                 bool on = (b.IsOn != null && b.IsOn());
                 if (on || b == hoverButton)
                 {
-                    Color fillColor = on ? Color.FromArgb(255, 0, 120, 215) : Color.FromArgb(70, 255, 255, 255);
+                    Color fillColor = on ? Theme.OnFill : Theme.Hover;
                     using (GraphicsPath bp = RoundedRect(b.Rect, (int)(8 * scale)))
                     using (SolidBrush fill = new SolidBrush(fillColor))
                     {
                         g.FillPath(fill, bp);
                     }
                 }
-                g.DrawString(b.Text, uiFont, Brushes.White, b.Rect, textFormat);
+                using (SolidBrush tb = new SolidBrush(on ? Theme.OnText : Theme.Text))
+                {
+                    g.DrawString(b.Text, uiFont, tb, b.Rect, textFormat);
+                }
             }
             g.SmoothingMode = oldSm;
         }
@@ -1482,15 +1565,15 @@ namespace ScreenshotTool
                 }
                 else
                 {
-                    bool windowMode = (mode == CaptureMode.Window)
-                        || (mode == CaptureMode.Overlay && Settings.WindowModeLast);
+                    int startMode = (mode == CaptureMode.Window) ? 1
+                        : (mode == CaptureMode.Overlay ? Settings.LastMode : 0);
                     for (;;)
                     {
-                        OverlayResult o = RunOverlay(windowMode);
+                        OverlayResult o = RunOverlay(startMode);
                         if (o.Restart)
                         {
                             // "Delay" on the capture bar: close, count down, then freeze the screen again.
-                            windowMode = o.RestartWindowMode;
+                            startMode = o.RestartMode;
                             Countdown(o.RestartDelay, toastMonitor);
                             continue;
                         }
@@ -1737,21 +1820,22 @@ namespace ScreenshotTool
             return canvas;
         }
 
-        private static OverlayResult RunOverlay(bool windowMode)
+        private static OverlayResult RunOverlay(int startMode)
         {
             Rectangle vs = VirtualScreen();
             Rectangle mon = CurrentMonitor();
             List<Rectangle> windows = CollectWindows();
-            Log("virtual screen = " + vs + ", monitor = " + mon + ", window mode = " + windowMode
+            Log("virtual screen = " + vs + ", monitor = " + mon + ", mode = " + startMode
                 + ", windows = " + windows.Count);
 
             OverlayResult res = new OverlayResult();
             using (Bitmap desktop = Grab(vs, PixelFormat.Format32bppRgb))
-            using (SelectionForm form = new SelectionForm(desktop, vs, windows, mon, windowMode))
+            using (SelectionForm form = new SelectionForm(desktop, vs, windows, MonitorRects(), mon, startMode))
             {
                 Log("grabbed desktop, showing overlay");
                 form.ShowDialog();
-                Log("overlay closed, outcome = " + form.Outcome + ", selection = " + form.Result);
+                Log("overlay closed, outcome = " + form.Outcome + ", selection = " + form.Result
+                    + (form.CloseReason.Length > 0 ? ", reason = " + form.CloseReason : ""));
 
                 if (form.Outcome == OverlayOutcome.Rect)
                 {
@@ -1772,7 +1856,7 @@ namespace ScreenshotTool
                 {
                     res.Restart = true;
                     res.RestartDelay = form.DelaySeconds;
-                    res.RestartWindowMode = form.RestartInWindowMode;
+                    res.RestartMode = form.RestartMode;
                 }
             }
             return res;
@@ -1895,21 +1979,19 @@ namespace ScreenshotTool
 
         private static Icon MakeIcon()
         {
+            // White on a dark taskbar, near-black on a light one.
+            Color fg = Theme.TaskbarLight ? Color.FromArgb(32, 32, 32) : Color.White;
             using (Bitmap b = new Bitmap(32, 32))
             using (Graphics g = Graphics.FromImage(b))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.Clear(Color.Transparent);
-                using (SolidBrush bg = new SolidBrush(Color.FromArgb(0, 120, 215)))
+                using (Pen p = new Pen(fg, 3.5f))
                 {
-                    g.FillEllipse(bg, 1, 1, 30, 30);
-                }
-                using (Pen p = new Pen(Color.White, 2.5f))
-                {
-                    g.DrawLine(p, 9, 14, 9, 9); g.DrawLine(p, 9, 9, 14, 9);
-                    g.DrawLine(p, 18, 9, 23, 9); g.DrawLine(p, 23, 9, 23, 14);
-                    g.DrawLine(p, 23, 18, 23, 23); g.DrawLine(p, 23, 23, 18, 23);
-                    g.DrawLine(p, 14, 23, 9, 23); g.DrawLine(p, 9, 23, 9, 18);
+                    g.DrawLine(p, 5, 12, 5, 5); g.DrawLine(p, 5, 5, 12, 5);
+                    g.DrawLine(p, 20, 5, 27, 5); g.DrawLine(p, 27, 5, 27, 12);
+                    g.DrawLine(p, 27, 20, 27, 27); g.DrawLine(p, 27, 27, 20, 27);
+                    g.DrawLine(p, 12, 27, 5, 27); g.DrawLine(p, 5, 27, 5, 20);
                 }
                 IntPtr hIcon = b.GetHicon();
                 try

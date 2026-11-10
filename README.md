@@ -6,7 +6,7 @@ One C# file, no dependencies, no installer, no sound.
 ## Build and run
 
 Double-click `build.bat`, or grab `Screenshot.exe` from the **latest** release (built by GitHub Actions).
-A blue icon appears in the tray.
+A neutral icon appears in the tray (white on a dark taskbar, dark on a light one). The capture bar follows the Windows light/dark setting.
 
 ## Hotkeys
 
@@ -26,7 +26,8 @@ The screen freezes and a bar appears at the top, like Snipping Tool.
 
 - **Region**: drag a rectangle. A plain click (no drag) takes the whole monitor under the mouse.
 - **Window**: hover a window to highlight it, click to capture it (works on any monitor, focused or not).
-- **Monitor** / **All monitors**: capture immediately.
+- **Monitor**: hover a monitor to highlight it, click to capture it (pick the left or right one, regardless of where you started). **All monitors**: captures immediately.
+- Clicking outside an existing selection only deselects it; it no longer captures the whole monitor.
 - **Delay 3s / 5s / 10s**: closes the bar, counts down, then freezes the screen again, so you can open a menu or tooltip first.
 - **Adjust** (toggle): after drawing a region you can drag its handles, drag inside to move it,
   nudge with the arrow keys (Shift = 10 px, Ctrl+arrows = resize), then press **Enter**, double-click, or click *Capture*.
