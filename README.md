@@ -31,9 +31,9 @@ The screen freezes and a bar appears at the top, like Snipping Tool.
 - **Edit** (off by default): after you draw a region it stays adjustable (handles, arrow keys, `Enter`), and after capturing an editor opens with pen, arrow, box, highlight and text, six colours, four sizes and undo. `Enter` keeps the result, `Esc` discards it.
 - **Follow mouse** (off by default): Monitor capture (the Monitor button and `Ctrl+PrtScn`) takes the monitor under the mouse straight away instead of asking which one.
 - Pressing the shortcut again while the bar is open closes it and opens a fresh one.
-- **Adjust** (toggle): after drawing a region you can drag its handles, drag inside to move it,
+- With **Edit** on, after drawing a region you can drag its handles, drag inside to move it,
   nudge with the arrow keys (Shift = 10 px, Ctrl+arrows = resize), then press **Enter**, double-click, or click *Capture*.
-  Turn it off to capture as soon as you release the mouse.
+  With it off, the region is captured as soon as you release the mouse.
 - **Save** / **Copy** (toggles): write a PNG file and/or put the shot on the clipboard. At least one stays on.
 - `Esc` or **X** closes. Right-click clears the selection, or closes if there is none.
 
