@@ -1224,6 +1224,7 @@ namespace ScreenshotTool
             Bounds = bounds;
 
             BuildToolbar();
+            slideOffset = (int)(34 * scale);
         }
 
         internal static float MonitorScale(Rectangle monitorScreen)
@@ -1466,6 +1467,7 @@ namespace ScreenshotTool
             TakeForeground();
             Activate();
             Focus();
+            StartSlideIn();
             if (restartPending)
             {
                 restartPending = false;
@@ -2056,7 +2058,37 @@ namespace ScreenshotTool
             catch (Exception) { acrylic = null; }
         }
 
+        private int slideOffset;   // pixels the bar is still above its place while it slides in
+
         private void DrawToolbar(Graphics g, Rectangle clip)
+        {
+            if (slideOffset == 0) { DrawToolbarCore(g, clip); return; }
+            GraphicsState keep = g.Save();
+            g.TranslateTransform(0, -slideOffset);
+            DrawToolbarCore(g, clip);
+            g.Restore(keep);
+        }
+
+        private void StartSlideIn()
+        {
+            int dist = slideOffset;
+            if (dist <= 0) return;
+            Stopwatch sw = Stopwatch.StartNew();
+            System.Windows.Forms.Timer t = new System.Windows.Forms.Timer();
+            t.Interval = 15;
+            t.Tick += delegate
+            {
+                if (IsDisposed) { t.Stop(); t.Dispose(); return; }
+                double k = Math.Min(1.0, sw.ElapsedMilliseconds / 170.0);
+                double ease = 1.0 - Math.Pow(1.0 - k, 3);
+                slideOffset = k >= 1.0 ? 0 : (int)Math.Round(dist * (1.0 - ease));
+                Invalidate(new Rectangle(toolbarRect.X - 4, toolbarRect.Y - dist - 4, toolbarRect.Width + 8, toolbarRect.Height + dist + 8));
+                if (k >= 1.0) { t.Stop(); t.Dispose(); }
+            };
+            t.Start();
+        }
+
+        private void DrawToolbarCore(Graphics g, Rectangle clip)
         {
             if (!toolbarRect.IntersectsWith(clip)) return;
             SmoothingMode oldSm = g.SmoothingMode;
@@ -2728,7 +2760,8 @@ namespace ScreenshotTool
                 if (o != null && !o.IsDisposed)
                 {
                     if (o.NeverShown) { Diag.Log("overlay never showed: forcing it closed"); o.ForceClose(); }
-                    else o.RestartFresh();
+                    else if (o.Visible) o.RestartFresh();
+                    else { pendingPresses++; Diag.Log("queued press (overlay not on screen yet): " + pendingPresses); }
                     return;
                 }
                 if (a != null && !a.IsDisposed)
@@ -2736,12 +2769,13 @@ namespace ScreenshotTool
                     try { a.WindowState = FormWindowState.Normal; Fg.Take(a.Handle); a.Activate(); } catch (Exception) { }
                     return;
                 }
-                // nothing is open: only trust "busy" for a few seconds, then start over
-                if ((DateTime.UtcNow - busySince).TotalSeconds < 8) return;
+                // between two overlays: remember the press, the next overlay picks it up
+                if ((DateTime.UtcNow - busySince).TotalSeconds < 8) { pendingPresses++; Diag.Log("queued press (between overlays): " + pendingPresses); return; }
                 Diag.Log("busy flag was stale: starting over");
             }
             busy = true;
             busySince = DateTime.UtcNow;
+            pendingPresses = 0;
             Diag.Log("capture start, mode " + mode);
             try
             {
@@ -2824,6 +2858,7 @@ namespace ScreenshotTool
             finally
             {
                 busy = false;
+                pendingPresses = 0;
                 Diag.Log("capture end (" + (int)(DateTime.UtcNow - busySince).TotalMilliseconds + " ms)");
             }
         }
@@ -2831,6 +2866,7 @@ namespace ScreenshotTool
         // Shows "Capturing in N..." and waits, keeping the UI responsive. The popup is gone
         // before this returns, so it never ends up in the screenshot.
         private static SelectionForm openOverlay;
+        private static int pendingPresses;   // shortcut presses that arrived while no overlay could take them
         private static AnnotateForm openAnnotate;
         private DateTime busySince = DateTime.UtcNow;
 
@@ -3093,6 +3129,12 @@ namespace ScreenshotTool
             {
                 Diag.Log("overlay prepared in " + ov.ElapsedMilliseconds + " ms (" + windows.Count + " windows), showing");
                 openOverlay = form;
+                SelectionForm shownForm = form;
+                form.Shown += delegate
+                {
+                    // every queued press gets its own fresh overlay
+                    if (pendingPresses > 0) { pendingPresses--; Diag.Log("queued press taken: " + pendingPresses + " left"); shownForm.RestartFresh(); }
+                };
                 try { form.ShowDialog(); }
                 finally { openOverlay = null; }
                 Diag.Log("overlay closed after " + ov.ElapsedMilliseconds + " ms: " + form.Outcome
