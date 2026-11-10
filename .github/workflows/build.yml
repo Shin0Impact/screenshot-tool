@@ -1,0 +1,38 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile with the C# compiler that ships with Windows
+        shell: cmd
+        run: >
+          "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /optimize+
+          /target:winexe /out:Screenshot.exe /win32manifest:app.manifest
+          /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll
+          Screenshot.cs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Screenshot
+          path: Screenshot.exe
+
+      - name: Publish as the "latest" release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest Screenshot.exe --target "$GITHUB_SHA" \
+            --title "Latest build" \
+            --notes "Screenshot.exe built from commit $GITHUB_SHA. Run it, no install needed."
