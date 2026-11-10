@@ -83,6 +83,24 @@ namespace ScreenshotTool
         public const uint SWP_NOACTIVATE = 0x0010;
         public const uint SWP_SHOWWINDOW = 0x0040;
 
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MSG
+        {
+            public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam;
+            public uint time; public int ptX; public int ptY;
+        }
+
+        [DllImport("user32.dll")]
+        public static extern int GetMessage(out MSG msg, IntPtr hWnd, uint min, uint max);
+        [DllImport("user32.dll")]
+        public static extern bool TranslateMessage(ref MSG msg);
+        [DllImport("user32.dll")]
+        public static extern IntPtr DispatchMessage(ref MSG msg);
+        [DllImport("user32.dll")]
+        public static extern bool PostThreadMessage(uint threadId, uint msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("kernel32.dll")]
+        public static extern uint GetCurrentThreadId();
+
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
 
@@ -1315,7 +1333,8 @@ namespace ScreenshotTool
         private readonly Control sync;
         private readonly Native.LowLevelKeyboardProc hookProc;
         private IntPtr hookHandle = IntPtr.Zero;
-        private readonly System.Windows.Forms.Timer hookTimer = new System.Windows.Forms.Timer();
+        private Thread hookThread;
+        private uint hookThreadId;
         private bool busy;
         private bool swallowKeyUp;
         private bool swallowSKeyUp;
@@ -1401,16 +1420,8 @@ namespace ScreenshotTool
             };
 
             hookProc = HookCallback;
-            InstallHook();
+            StartHookThread();
             Log("started; hook handle = " + hookHandle);
-            // Windows silently drops a low-level hook if it ever stalls (sleep, lock, display change,
-            // a slow callback). Re-install it regularly so the hotkeys never fall back to Windows.
-            hookTimer.Interval = 15000;
-            hookTimer.Tick += delegate { InstallHook(); };
-            hookTimer.Start();
-            SystemEvents.DisplaySettingsChanged += delegate { InstallHook(); Log("display change: hook re-installed"); };
-            SystemEvents.SessionSwitch += delegate { InstallHook(); Log("session switch: hook re-installed"); };
-            SystemEvents.PowerModeChanged += delegate { InstallHook(); Log("power change: hook re-installed"); };
             sync.BeginInvoke(new Action(WarmUp));
             if (hookHandle == IntPtr.Zero)
             {
@@ -1421,24 +1432,42 @@ namespace ScreenshotTool
 
         // ---- keyboard hook -------------------------------------------------------------
 
-        // Installs a fresh hook, then removes the previous one, so there is never a gap.
-        private void InstallHook()
+        // The hook lives on its own thread with its own message loop. A low-level hook that sits on
+        // the UI thread is silently dropped by Windows whenever that thread is busy for too long
+        // (grabbing the screen, saving a PNG, filling the clipboard), which is when Windows' own
+        // Snipping Tool used to take over again.
+        private void StartHookThread()
         {
-            IntPtr fresh;
-            using (Process p = Process.GetCurrentProcess())
-            using (ProcessModule m = p.MainModule)
+            ManualResetEvent ready = new ManualResetEvent(false);
+            hookThread = new Thread(delegate()
             {
-                fresh = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, hookProc,
-                    Native.GetModuleHandle(m.ModuleName), 0);
-            }
-            if (fresh == IntPtr.Zero)
-            {
-                Log("hook install failed, error = " + Marshal.GetLastWin32Error());
-                return;
-            }
-            IntPtr old = hookHandle;
-            hookHandle = fresh;
-            if (old != IntPtr.Zero) Native.UnhookWindowsHookEx(old);
+                hookThreadId = Native.GetCurrentThreadId();
+                using (Process p = Process.GetCurrentProcess())
+                using (ProcessModule m = p.MainModule)
+                {
+                    hookHandle = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, hookProc,
+                        Native.GetModuleHandle(m.ModuleName), 0);
+                }
+                int err = Marshal.GetLastWin32Error();
+                ready.Set();
+                if (hookHandle == IntPtr.Zero)
+                {
+                    Log("hook install failed, error = " + err);
+                    return;
+                }
+                Native.MSG msg;
+                while (Native.GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
+                {
+                    Native.TranslateMessage(ref msg);
+                    Native.DispatchMessage(ref msg);
+                }
+                Native.UnhookWindowsHookEx(hookHandle);
+                hookHandle = IntPtr.Zero;
+            });
+            hookThread.IsBackground = true;
+            hookThread.Name = "keyboard hook";
+            hookThread.Start();
+            ready.WaitOne(3000);
         }
 
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
@@ -1546,11 +1575,13 @@ namespace ScreenshotTool
 
         public static void WriteLog(string text) { Log(text); }
 
+        private static readonly object logLock = new object();
+
         private static void Log(string text)
         {
             try
             {
-                File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshot-tool.log"),
+                lock (logLock) File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshot-tool.log"),
                     DateTime.Now.ToString("HH:mm:ss.fff") + "  " + text + "\r\n");
             }
             catch (Exception) { }
@@ -2043,11 +2074,7 @@ namespace ScreenshotTool
 
         protected override void ExitThreadCore()
         {
-            if (hookHandle != IntPtr.Zero)
-            {
-                Native.UnhookWindowsHookEx(hookHandle);
-                hookHandle = IntPtr.Zero;
-            }
+            if (hookThreadId != 0) Native.PostThreadMessage(hookThreadId, 0x0012, IntPtr.Zero, IntPtr.Zero); // WM_QUIT
             tray.Visible = false;
             tray.Dispose();
             sync.Dispose();
