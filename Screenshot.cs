@@ -2907,13 +2907,90 @@ namespace ScreenshotTool
     // starts the installed copy; a newer launcher updates it. "Screenshot.exe --uninstall" removes it.
     static class Setup
     {
-        private static string InstallDir
+        private const string UninstallKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ScreenshotTool";
+        private static string installDirOverride;
+
+        private static string ProgramFilesDir
         {
             get
             {
                 string pf = Environment.GetEnvironmentVariable("ProgramW6432");
                 if (string.IsNullOrEmpty(pf)) pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-                return Path.Combine(pf, "ScreenshotTool");
+                return pf;
+            }
+        }
+
+        private static string DefaultDir { get { return Path.Combine(ProgramFilesDir, "ScreenshotTool"); } }
+
+        // Where Setup put the app last time (null if never installed).
+        private static string RegisteredDir()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(UninstallKey))
+                {
+                    if (k == null) return null;
+                    string v = k.GetValue("InstallLocation") as string;
+                    return string.IsNullOrEmpty(v) ? null : v;
+                }
+            }
+            catch (Exception) { return null; }
+        }
+
+        private static string InstallDir
+        {
+            get
+            {
+                if (installDirOverride != null) return installDirOverride;
+                string r = RegisteredDir();
+                return r != null ? r : DefaultDir;
+            }
+        }
+
+        // A UIAccess app only starts from a protected folder, so the location has to be a folder inside
+        // Program Files. It must not be Program Files itself: uninstalling deletes the whole folder.
+        private static bool IsUnderProgramFiles(string dir)
+        {
+            try
+            {
+                string full = Path.GetFullPath(dir).TrimEnd('\\');
+                return full.StartsWith(ProgramFilesDir.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception) { return false; }
+        }
+
+        private static bool IsValidDir(string dir)
+        {
+            try
+            {
+                string full = Path.GetFullPath(dir).TrimEnd('\\');
+                string pf = ProgramFilesDir.TrimEnd('\\');
+                if (!full.StartsWith(pf + "\\", StringComparison.OrdinalIgnoreCase)) return false;
+                if (Directory.Exists(full))
+                {
+                    bool mine = File.Exists(Path.Combine(full, "version.txt"));
+                    if (!mine && Directory.GetFileSystemEntries(full).Length > 0) return false;
+                }
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        private static string ChooseDir()
+        {
+            while (true)
+            {
+                using (FolderBrowserDialog fb = new FolderBrowserDialog())
+                {
+                    fb.Description = "Where should Screenshot be installed? It must be a folder inside Program Files "
+                        + "so that Windows lets it see keys typed into administrator windows. The default is fine for most people.";
+                    fb.SelectedPath = InstallDir;
+                    fb.ShowNewFolderButton = true;
+                    if (fb.ShowDialog() != DialogResult.OK) return null;
+                    if (IsValidDir(fb.SelectedPath)) return Path.GetFullPath(fb.SelectedPath).TrimEnd('\\');
+                }
+                MessageBox.Show("Please choose a new or empty folder inside\r\n" + ProgramFilesDir
+                    + "\r\n(for example " + DefaultDir + ").", "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
 
@@ -3041,7 +3118,7 @@ namespace ScreenshotTool
         }
 
         // Runs elevated (started with "runas" by the launcher).
-        private static int Install(byte[] data, string version, int parentPid)
+        private static int Install(byte[] data, string version, int parentPid, string oldDir)
         {
             string output = "";
             int code = 1;
@@ -3054,7 +3131,7 @@ namespace ScreenshotTool
                 string script = @"
 $ErrorActionPreference = 'Stop'
 try {
-  $src = '__SRC__'; $dir = '__DIR__'; $ver = '__VER__'; $user = '__USER__'; $launcher = '__LAUNCHER__'
+  $src = '__SRC__'; $dir = '__DIR__'; $ver = '__VER__'; $user = '__USER__'; $launcher = '__LAUNCHER__'; $old = '__OLD__'
   $subject = 'CN=Screenshot Tool (local)'
   $target = Join-Path $dir 'Screenshot.exe'
   $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -eq $subject -and $_.NotAfter -gt (Get-Date).AddDays(30) } | Select-Object -First 1
@@ -3064,6 +3141,7 @@ try {
   Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
   Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
   Remove-Item $cer -Force
+  if ($old -and ($old -ne $dir) -and (Test-Path $old)) { Remove-Item $old -Recurse -Force -ErrorAction SilentlyContinue }
   New-Item -ItemType Directory -Force $dir | Out-Null
   Copy-Item $src $target -Force
   $sig = Set-AuthenticodeSignature -FilePath $target -Certificate $cert -HashAlgorithm SHA256
@@ -3088,7 +3166,7 @@ try {
   Write-Output ('FAILED: ' + $_.Exception.Message)
   exit 1
 }
-".Replace("__SRC__", Q(tmp)).Replace("__DIR__", Q(InstallDir)).Replace("__VER__", Q(version)).Replace("__USER__", Q(user)).Replace("__LAUNCHER__", Q(Application.ExecutablePath));
+".Replace("__SRC__", Q(tmp)).Replace("__DIR__", Q(InstallDir)).Replace("__VER__", Q(version)).Replace("__USER__", Q(user)).Replace("__LAUNCHER__", Q(Application.ExecutablePath)).Replace("__OLD__", Q(oldDir));
                 code = RunPowerShell(script, out output);
             }
             catch (Exception ex)
@@ -3110,6 +3188,8 @@ try {
             try
             {
                 KillOthers(parentPid);
+                string target = InstallDir;
+                if (!IsUnderProgramFiles(target)) target = DefaultDir;
                 string script = @"
 $ErrorActionPreference = 'Continue'
 $subject = 'CN=Screenshot Tool (local)'
@@ -3120,7 +3200,7 @@ foreach ($store in 'Cert:\LocalMachine\My', 'Cert:\LocalMachine\Root', 'Cert:\Lo
   Get-ChildItem $store | Where-Object { $_.Subject -eq $subject } | Remove-Item -Force
 }
 Write-Output 'OK'
-".Replace("__DIR__", Q(InstallDir));
+".Replace("__DIR__", Q(target));
                 int code = RunPowerShell(script, out output);
                 try { File.WriteAllText(SetupLog, output); } catch (Exception) { }
                 return code;
@@ -3133,10 +3213,10 @@ Write-Output 'OK'
         }
 
         // Starts this same exe elevated with the given argument and waits. Returns -2 if the user said no.
-        private static int RunElevated(string argument)
+        private static int RunElevated(string argument, string dir)
         {
             ProcessStartInfo psi = new ProcessStartInfo(Application.ExecutablePath,
-                argument + " " + Process.GetCurrentProcess().Id);
+                argument + " " + Process.GetCurrentProcess().Id + (dir != null ? " \"" + dir + "\"" : ""));
             psi.Verb = "runas";
             psi.UseShellExecute = true;
             try
@@ -3161,7 +3241,13 @@ Write-Output 'OK'
             int parent = 0;
             if (args.Length > 1) int.TryParse(args[1], out parent);
 
-            if (cmd == "--install-elevated") { Environment.ExitCode = Install(data, version, parent); return false; }
+            if (cmd == "--install-elevated")
+            {
+                string old = RegisteredDir();
+                if (args.Length > 2) installDirOverride = args[2];
+                Environment.ExitCode = Install(data, version, parent, old);
+                return false;
+            }
             if (cmd == "--uninstall-elevated") { Environment.ExitCode = Uninstall(parent); return false; }
 
             Application.EnableVisualStyles();
@@ -3186,7 +3272,7 @@ Write-Output 'OK'
                     }
                     return false;
                 }
-                int rc = RunElevated("--uninstall-elevated");
+                int rc = RunElevated("--uninstall-elevated", null);
                 try { File.Delete(SetupLog); } catch (Exception) { }
                 MessageBox.Show(rc == 0 ? "Screenshot was removed." : "Could not remove it.",
                     "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -3208,15 +3294,18 @@ Write-Output 'OK'
             if (IsCurrent(version) && LaunchInstalled()) return false;
 
             DialogResult ask = MessageBox.Show(
-                "Screenshot needs a one-time setup so its hotkeys also work over games and other programs " +
+                "Screenshot installer.\r\n\r\nScreenshot needs a one-time setup so its hotkeys also work over games and other programs " +
                 "that run as administrator. Windows will ask for permission once; after that it starts " +
-                "normally, with no prompts.\r\n\r\nSet it up now?\r\n\r\n" +
-                "Yes = set up     No = run without it (hotkeys won't work over administrator windows)     Cancel = quit",
-                "Screenshot - first run", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                "normally, with no prompts.\r\n\r\nYou will pick the install folder next (the default is fine).\r\n\r\n" +
+                "Yes = install     No = run without it (hotkeys won't work over administrator windows)     Cancel = quit",
+                "Screenshot installer", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
             if (ask == DialogResult.Cancel) return false;
             if (ask == DialogResult.No) return true;
 
-            int result = RunElevated("--install-elevated");
+            string chosen = ChooseDir();
+            if (chosen == null) return false;   // cancelled
+            installDirOverride = chosen;
+            int result = RunElevated("--install-elevated", chosen);
             if (result == -2) return true;   // permission refused: run without the setup
             if (IsCurrent(version)) { try { File.Delete(SetupLog); } catch (Exception) { } if (LaunchInstalled()) return false; }
 

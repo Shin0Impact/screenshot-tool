@@ -5,7 +5,7 @@ One C# file, no dependencies, no installer, no sound.
 
 ## Build and run
 
-Double-click `build.bat`, or grab `Screenshot.exe` from the **latest** release (built by GitHub Actions).
+Double-click `build.bat`, or grab `Screenshot-Installer.exe` from the **latest** release (built by GitHub Actions).
 A neutral icon appears in the tray (white on a dark taskbar, dark on a light one). The capture bar follows the Windows light/dark setting.
 
 ## Hotkeys
@@ -67,15 +67,15 @@ administrator, Task Manager, ...), so ordinary hotkeys do nothing there and Wind
 Tool opens instead. A "UIAccess" program is allowed to, without being elevated itself, but Windows
 only starts one that is signed with a trusted certificate and installed in Program Files.
 
-`Screenshot.exe` takes care of that by itself:
+`Screenshot-Installer.exe` takes care of that by itself:
 
 1. Double-click it. The first time it asks to do a one-time setup and Windows shows **one**
    permission prompt.
 2. It creates a local self-signed certificate (trusted on this PC, only used for this exe), installs
    a signed copy of the app to `C:\Program Files\ScreenshotTool`, and sets it to start at logon, not
    elevated.
-3. From then on, double-clicking `Screenshot.exe` just starts the installed copy. A newer
-   `Screenshot.exe` updates it the same way (one prompt again).
+3. From then on, running the installer again just starts the installed copy. A newer
+   installer updates it the same way (one prompt again). You choose the install folder (default `C:\Program Files\ScreenshotTool`; it has to be inside Program Files for the administrator-window support).
 4. To remove it: Settings > Apps > "Screenshot", the tray menu's "Uninstall...", or `Uninstall.exe` in the install folder. It removes the app, the startup task and the certificate.
 
 Choosing *No* at the first prompt runs the app without the setup: everything works except over
