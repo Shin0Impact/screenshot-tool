@@ -1915,7 +1915,7 @@ namespace ScreenshotTool
             {
                 Rectangle r = new Rectangle(0, 0, 64, 64);
                 using (Bitmap b = Grab(r, PixelFormat.Format32bppRgb))
-                using (SelectionForm f = new SelectionForm(b, r, new List<Rectangle>(), r, false))
+                using (SelectionForm f = new SelectionForm(b, r, new List<Rectangle>(), new List<Rectangle>(), r, 0))
                 using (Bitmap t = new Bitmap(64, 64, PixelFormat.Format32bppRgb))
                 using (Graphics g = Graphics.FromImage(t))
                 {
