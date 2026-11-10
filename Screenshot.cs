@@ -116,6 +116,10 @@ namespace ScreenshotTool
         public static extern uint GetCurrentThreadId();
 
         [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint vk);
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+        [DllImport("user32.dll", SetLastError = true)]
         public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
@@ -2377,6 +2381,7 @@ namespace ScreenshotTool
 
             hookProc = HookCallback;
             StartHookThread();
+            RegisterBackupHotkeys();
             CleanOldLogs();
             MigrateStartup();
             Thread wd = new Thread(Watchdog);
@@ -2388,6 +2393,46 @@ namespace ScreenshotTool
                 MessageBox.Show("Could not install the PrtScn hook. Use the tray icon to capture instead.",
                     "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
+        }
+
+        // Backup for the keyboard hook: Windows' own RegisterHotKey for the PrtScn shortcuts. While the hook works it
+        // swallows these keys first, so this never fires twice; if Windows drops the hook, this still works.
+        private sealed class HotkeyWindow : NativeWindow
+        {
+            private readonly Action<int> onHotkey;
+            public HotkeyWindow(Action<int> cb)
+            {
+                onHotkey = cb;
+                CreateParams cp = new CreateParams();
+                cp.Parent = (IntPtr)(-3);   // HWND_MESSAGE: no visible window
+                CreateHandle(cp);
+            }
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == 0x0312) onHotkey(m.WParam.ToInt32());   // WM_HOTKEY
+                else base.WndProc(ref m);
+            }
+        }
+        private HotkeyWindow hotkeyWindow;
+
+        private void RegisterBackupHotkeys()
+        {
+            try
+            {
+                hotkeyWindow = new HotkeyWindow(delegate(int id)
+                {
+                    CaptureMode m = id == 2 ? CaptureMode.Monitor : id == 3 ? CaptureMode.Window : id == 4 ? CaptureMode.AllMonitors : CaptureMode.Overlay;
+                    Diag.Log("hotkey came through RegisterHotKey (the keyboard hook did not see it): " + m);
+                    Post(m);
+                });
+                uint norepeat = 0x4000;
+                bool a = Native.RegisterHotKey(hotkeyWindow.Handle, 1, norepeat, (uint)Native.VK_SNAPSHOT);
+                bool b = Native.RegisterHotKey(hotkeyWindow.Handle, 2, norepeat | 2, (uint)Native.VK_SNAPSHOT);
+                bool c = Native.RegisterHotKey(hotkeyWindow.Handle, 3, norepeat | 1, (uint)Native.VK_SNAPSHOT);
+                bool d = Native.RegisterHotKey(hotkeyWindow.Handle, 4, norepeat | 4, (uint)Native.VK_SNAPSHOT);
+                Diag.Log("backup hotkeys registered: PrtScn=" + a + " Ctrl=" + b + " Alt=" + c + " Shift=" + d);
+            }
+            catch (Exception ex) { Diag.Log("backup hotkeys failed: " + ex.Message); }
         }
 
         // Windows silently drops a low-level keyboard hook that was ever too slow, after which no shortcut works
@@ -3472,6 +3517,7 @@ namespace ScreenshotTool
         protected override void ExitThreadCore()
         {
             if (hookThreadId != 0) Native.PostThreadMessage(hookThreadId, 0x0012, IntPtr.Zero, IntPtr.Zero); // WM_QUIT
+            try { if (hotkeyWindow != null) hotkeyWindow.DestroyHandle(); } catch (Exception) { }
             tray.Visible = false;
             tray.Dispose();
             sync.Dispose();
