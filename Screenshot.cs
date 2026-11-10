@@ -3370,7 +3370,7 @@ Write-Output 'OK'
                 TopMost = true;
 
                 Label head = new Label();
-                head.SetBounds(16, 14, 648, 80);
+                head.SetBounds(16, 14, 668, 80);
                 Controls.Add(head);
 
                 if (adminDir == null && userDir == null)
@@ -3436,7 +3436,7 @@ Write-Output 'OK'
                     return;
                 }
 
-                ClientSize = new Size(680, 190);
+                ClientSize = new Size(700, 190);
                 bool admin = adminDir != null;
                 bool current = admin ? adminCurrent : userCurrent;
                 head.Text = admin
@@ -3445,14 +3445,16 @@ Write-Output 'OK'
                         + "programs that run as administrator.";
                 if (!current) head.Text += "\r\n\r\nThe installed copy needs an update or repair.";
 
-                int x = 16;
-                if (!admin) { AddButton("Add administrator support", "addadmin", x, 120, 200); x += 208; }
-                if (!current) { AddButton("Update", "update", x, 120, 96); x += 104; }
-                else { AddButton("Start Screenshot", "start", x, 120, 140); x += 148; }
-                if (admin) { AddButton("Remove administrator support", "removeadmin", x, 120, 210); x += 218; }
-                AddButton("Uninstall", "uninstall", x, 120, 100);
+                // Fixed slots so each button is always in the same place: [Start/Update] [administrator
+                // support, in the middle] [Uninstall] [Close].
+                int bw = 700;
+                if (!current) AddButton("Update", "update", 16, 120, 150);
+                else AddButton("Start Screenshot", "start", 16, 120, 150);
+                if (admin) AddButton("Remove administrator support", "removeadmin", (bw - 250) / 2, 120, 250);
+                else AddButton("Add administrator support", "addadmin", (bw - 250) / 2, 120, 250);
+                AddButton("Uninstall", "uninstall", 482, 120, 96);
                 Button close = new Button();
-                close.SetBounds(564, 120, 100, 32);
+                close.SetBounds(588, 120, 96, 32);
                 close.Text = "Close";
                 close.Click += delegate { Action = "close"; DialogResult = DialogResult.Cancel; };
                 Controls.Add(close);
