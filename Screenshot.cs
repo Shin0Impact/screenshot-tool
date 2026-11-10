@@ -95,8 +95,6 @@ namespace ScreenshotTool
         [DllImport("user32.dll")]
         public static extern bool BringWindowToTop(IntPtr hWnd);
         [DllImport("user32.dll")]
-        public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
-        [DllImport("user32.dll")]
         public static extern int GetMessage(out MSG msg, IntPtr hWnd, uint min, uint max);
         [DllImport("user32.dll")]
         public static extern bool TranslateMessage(ref MSG msg);
