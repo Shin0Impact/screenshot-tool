@@ -6,6 +6,15 @@
       <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
     </application>
   </compatibility>
+  <!-- Run as administrator: a keyboard hook cannot see keys typed into an elevated window
+       (e.g. a game started as admin), so without this the hotkeys do nothing there. -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <requestedExecutionLevel level="highestAvailable" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
   <!-- Per-monitor DPI awareness: screen coordinates are real device pixels on every monitor,
        so mixed 1080p / 1440p setups are captured 1:1 with no scaling or blur. -->
   <application xmlns="urn:schemas-microsoft-com:asm.v3">

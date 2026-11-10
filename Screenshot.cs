@@ -2131,36 +2131,75 @@ namespace ScreenshotTool
             catch (Exception) { }
         }
 
-        private static bool IsStartupEnabled()
+        // Starting with Windows uses a scheduled task that runs with the highest privileges, so the
+        // (elevated) app starts at logon without a UAC prompt.
+        private const string TaskName = "ScreenshotTool";
+
+        private static int RunSchtasks(string args)
         {
             try
             {
-                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKeyPath, false))
+                ProcessStartInfo psi = new ProcessStartInfo("schtasks.exe", args);
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                using (Process p = Process.Start(psi))
                 {
-                    return k != null && k.GetValue(RunValueName) != null;
+                    p.WaitForExit(15000);
+                    return p.HasExited ? p.ExitCode : -1;
                 }
             }
-            catch (Exception) { return false; }
+            catch (Exception) { return -1; }
+        }
+
+        private static bool IsStartupEnabled()
+        {
+            return RunSchtasks("/Query /TN " + TaskName) == 0;
+        }
+
+        private static string XmlEscape(string t)
+        {
+            return t.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
         }
 
         private void ToggleStartup()
         {
             try
             {
-                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
+                if (IsStartupEnabled())
                 {
-                    if (k == null) return;
-                    if (k.GetValue(RunValueName) != null)
+                    RunSchtasks("/Delete /TN " + TaskName + " /F");
+                }
+                else
+                {
+                    string user = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+                    string xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>"
+                        + "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">"
+                        + "<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + XmlEscape(user) + "</UserId></LogonTrigger></Triggers>"
+                        + "<Principals><Principal id=\"Author\"><UserId>" + XmlEscape(user) + "</UserId>"
+                        + "<LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>"
+                        + "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
+                        + "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+                        + "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
+                        + "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit><AllowHardTerminate>true</AllowHardTerminate></Settings>"
+                        + "<Actions Context=\"Author\"><Exec><Command>" + XmlEscape(Application.ExecutablePath) + "</Command></Exec></Actions></Task>";
+                    string tmp = Path.Combine(Path.GetTempPath(), "screenshot-tool-task.xml");
+                    File.WriteAllText(tmp, xml, Encoding.Unicode);
+                    int rc = RunSchtasks("/Create /TN " + TaskName + " /XML \"" + tmp + "\" /F");
+                    Log("startup task create exit code = " + rc);
+                    try { File.Delete(tmp); } catch (Exception) { }
+                    // drop the old non-elevated Run entry, if any
+                    try
                     {
-                        k.DeleteValue(RunValueName, false);
+                        using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
+                        {
+                            if (k != null) k.DeleteValue(RunValueName, false);
+                        }
                     }
-                    else
-                    {
-                        k.SetValue(RunValueName, "\"" + Application.ExecutablePath + "\"");
-                    }
+                    catch (Exception) { }
                 }
             }
-            catch (Exception) { }
+            catch (Exception ex) { Log("startup toggle error: " + ex.Message); }
             startupItem.Checked = IsStartupEnabled();
         }
 

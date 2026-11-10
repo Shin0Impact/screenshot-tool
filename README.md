@@ -59,3 +59,11 @@ screen's real pixels on each monitor. Nothing is resized, except when you ask fo
 - Some anti-cheat systems dislike any keyboard hook. Quit the app before playing those.
 
 `screenshot-tool.log` next to the exe records start-up and capture timings, useful for debugging.
+
+## Administrator rights
+
+The app runs elevated (it asks for permission when it starts). Windows does not let a normal
+program's keyboard hook see keys typed into an elevated window, such as a game that was started
+as administrator, so without this the hotkeys silently do nothing there and Windows' own
+Snipping Tool opens instead. "Start with Windows" creates a scheduled task that runs with the
+highest privileges, so it starts at login without a prompt.
