@@ -304,6 +304,31 @@ namespace ScreenshotTool
         }
     }
 
+    class MenuColors : ProfessionalColorTable
+    {
+        public static Color Back() { return Theme.Light ? Color.FromArgb(249, 249, 249) : Color.FromArgb(43, 43, 43); }
+        private static Color Hot() { return Theme.Light ? Color.FromArgb(229, 229, 229) : Color.FromArgb(70, 70, 70); }
+        private static Color Line() { return Theme.Light ? Color.FromArgb(205, 205, 205) : Color.FromArgb(72, 72, 72); }
+
+        public override Color ToolStripDropDownBackground { get { return Back(); } }
+        public override Color ImageMarginGradientBegin { get { return Back(); } }
+        public override Color ImageMarginGradientMiddle { get { return Back(); } }
+        public override Color ImageMarginGradientEnd { get { return Back(); } }
+        public override Color MenuBorder { get { return Line(); } }
+        public override Color MenuItemBorder { get { return Hot(); } }
+        public override Color MenuItemSelected { get { return Hot(); } }
+        public override Color MenuItemSelectedGradientBegin { get { return Hot(); } }
+        public override Color MenuItemSelectedGradientEnd { get { return Hot(); } }
+        public override Color MenuItemPressedGradientBegin { get { return Hot(); } }
+        public override Color MenuItemPressedGradientMiddle { get { return Hot(); } }
+        public override Color MenuItemPressedGradientEnd { get { return Hot(); } }
+        public override Color SeparatorDark { get { return Line(); } }
+        public override Color SeparatorLight { get { return Back(); } }
+        public override Color CheckBackground { get { return Hot(); } }
+        public override Color CheckSelectedBackground { get { return Hot(); } }
+        public override Color CheckPressedBackground { get { return Hot(); } }
+    }
+
     // Neutral colours that follow the Windows light/dark setting.
     static class Theme
     {
@@ -1123,14 +1148,6 @@ namespace ScreenshotTool
                 delegate { Settings.Edit = !Settings.Edit; Settings.Save(); });
             AddButton("Save", delegate { return Settings.SaveFile; }, delegate { Settings.ToggleSave(); });
             AddButton("Copy", delegate { return Settings.CopyClipboard; }, delegate { Settings.ToggleCopy(); });
-            AddButton("Follow mouse", delegate { return Settings.MonitorFollow; },
-                delegate
-                {
-                    Settings.MonitorFollow = !Settings.MonitorFollow;
-                    Settings.Save();
-                    if (mode != 0 && Settings.MonitorFollow) SetMode(0);
-                    Invalidate();
-                });
             AddSeparator();
             AddButton("X", null, delegate { Cancel("X button"); });
 
@@ -2020,15 +2037,16 @@ namespace ScreenshotTool
             GC.KeepAlive(force);
 
             ContextMenuStrip menu = new ContextMenuStrip();
-            menu.Items.Add("Capture bar  (PrtScn / Win+Shift+S)", null, delegate { PostDelayed(CaptureMode.Overlay); });
-            menu.Items.Add("Capture a monitor  (Ctrl+PrtScn)", null, delegate { PostDelayed(CaptureMode.Monitor); });
-            menu.Items.Add("Capture a window  (Alt+PrtScn)", null, delegate { PostDelayed(CaptureMode.Window); });
-            menu.Items.Add("Capture all monitors, same height  (Shift+PrtScn)", null, delegate { PostDelayed(CaptureMode.AllMonitors); });
+            menu.Font = new Font("Segoe UI", 12f, FontStyle.Regular, GraphicsUnit.Point);
+            menu.Items.Add("Capture bar  (PrtScn)", null, delegate { PostDelayed(CaptureMode.Overlay); });
+            menu.Items.Add("Monitor  (Ctrl+PrtScn)", null, delegate { PostDelayed(CaptureMode.Monitor); });
+            menu.Items.Add("Window  (Alt+PrtScn)", null, delegate { PostDelayed(CaptureMode.Window); });
+            menu.Items.Add("All monitors  (Shift+PrtScn)", null, delegate { PostDelayed(CaptureMode.AllMonitors); });
             menu.Items.Add(new ToolStripSeparator());
 
-            ToolStripMenuItem adjustItem = new ToolStripMenuItem("Edit: adjust the selection, then annotate");
+            ToolStripMenuItem adjustItem = new ToolStripMenuItem("Edit (adjust + annotate)");
             adjustItem.Click += delegate { Settings.Edit = !Settings.Edit; Settings.Save(); };
-            ToolStripMenuItem followItem = new ToolStripMenuItem("Monitor and window capture follow the mouse (no picking)");
+            ToolStripMenuItem followItem = new ToolStripMenuItem("Follow mouse (no picking)");
             followItem.Click += delegate { Settings.MonitorFollow = !Settings.MonitorFollow; Settings.Save(); };
             ToolStripMenuItem saveItem = new ToolStripMenuItem("Save to file");
             saveItem.Click += delegate { Settings.ToggleSave(); };
@@ -2039,12 +2057,12 @@ namespace ScreenshotTool
             menu.Items.Add(copyItem);
             menu.Items.Add(followItem);
 
-            ToolStripMenuItem tolItem = new ToolStripMenuItem("Click tolerance (click = whole monitor)");
+            ToolStripMenuItem tolItem = new ToolStripMenuItem("Click tolerance");
             int[] tolChoices = new int[] { 0, 5, 12, 25, 50 };
             foreach (int choice in tolChoices)
             {
                 int value = choice;
-                ToolStripMenuItem item = new ToolStripMenuItem(value == 0 ? "Off (any movement selects a region)" : value + " px");
+                ToolStripMenuItem item = new ToolStripMenuItem(value == 0 ? "Off" : value + " px");
                 item.Tag = value;
                 item.Click += delegate
                 {
@@ -2065,6 +2083,7 @@ namespace ScreenshotTool
             // keep the check marks in sync with the settings (they can also change from the capture bar)
             menu.Opening += delegate
             {
+                ApplyMenuTheme(menu);
                 adjustItem.Checked = Settings.Adjust;
                 saveItem.Checked = Settings.SaveFile;
                 copyItem.Checked = Settings.CopyClipboard;
@@ -2872,6 +2891,33 @@ namespace ScreenshotTool
             }
             catch (Exception ex) { Log("startup toggle error: " + ex.Message); }
             startupItem.Checked = IsStartupEnabled();
+        }
+
+        // Neutral menu colours that follow the Windows light/dark setting.
+        private static void ApplyMenuTheme(ContextMenuStrip menu)
+        {
+            Theme.Refresh();
+            menu.Renderer = new ToolStripProfessionalRenderer(new MenuColors());
+            Color bg = MenuColors.Back();
+            Color fg = Theme.Light ? Color.FromArgb(25, 25, 25) : Color.FromArgb(240, 240, 240);
+            menu.BackColor = bg;
+            menu.ForeColor = fg;
+            StyleItems(menu.Items, bg, fg);
+        }
+
+        private static void StyleItems(ToolStripItemCollection items, Color bg, Color fg)
+        {
+            foreach (ToolStripItem it in items)
+            {
+                it.BackColor = bg;
+                it.ForeColor = fg;
+                ToolStripMenuItem mi = it as ToolStripMenuItem;
+                if (mi != null && mi.HasDropDownItems)
+                {
+                    mi.DropDown.BackColor = bg;
+                    StyleItems(mi.DropDownItems, bg, fg);
+                }
+            }
         }
 
         private static Icon MakeIcon()

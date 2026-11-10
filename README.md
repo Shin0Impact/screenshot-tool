@@ -29,7 +29,7 @@ The screen freezes and a bar appears at the top, like Snipping Tool.
 - **Monitor**: hover a monitor to highlight it, click to capture it (pick the left or right one, regardless of where you started). **All monitors**: captures immediately.
 - Clicking outside an existing selection only deselects it; it no longer captures the whole monitor.
 - **Edit** (off by default): after you draw a region it stays adjustable (handles, arrow keys, `Enter`), and after capturing an editor opens with pen, arrow, box, highlight and text, six colours, four sizes and undo. `Enter` keeps the result, `Esc` discards it.
-- **Follow mouse** (off by default): Monitor and Window capture (the bar buttons, `Ctrl+PrtScn` and `Alt+PrtScn`) take the monitor or window under the mouse straight away instead of asking you to pick one.
+- **Follow mouse** (off by default, tray menu only): Monitor and Window capture (the bar buttons, `Ctrl+PrtScn` and `Alt+PrtScn`) take the monitor or window under the mouse straight away instead of asking you to pick one.
 - Pressing the shortcut again while the bar is open closes it and opens a fresh one.
 - With **Edit** on, after drawing a region you can drag its handles, drag inside to move it,
   nudge with the arrow keys (Shift = 10 px, Ctrl+arrows = resize), then press **Enter**, double-click, or click *Capture*.
