@@ -14,7 +14,7 @@ A neutral icon appears in the tray (white on a dark taskbar, dark on a light one
 |-----|--------|
 | `PrtScn` or `Win+Shift+S` | opens the **capture bar** (below) in the mode you used last |
 | `Alt+PrtScn` | capture bar in window mode |
-| `Ctrl+PrtScn` | open the capture bar in Monitor mode: hover a monitor, click to capture it |
+| `Ctrl+PrtScn` | open the capture bar in Monitor mode: hover a monitor, click to capture it (with *Follow mouse* on: captures the monitor under the mouse instantly) |
 | `Shift+PrtScn` | instantly capture all monitors side by side, scaled to the same height (no black gap) |
 | `Win+PrtScn` | untouched, normal Windows behaviour |
 
@@ -28,7 +28,8 @@ The screen freezes and a bar appears at the top, like Snipping Tool.
 - **Window**: hover a window to highlight it, click to capture it (works on any monitor, focused or not).
 - **Monitor**: hover a monitor to highlight it, click to capture it (pick the left or right one, regardless of where you started). **All monitors**: captures immediately.
 - Clicking outside an existing selection only deselects it; it no longer captures the whole monitor.
-- **Annotate** (off by default): after capturing, opens an editor with pen, arrow, box, highlight and text, six colours, four sizes and undo. `Enter` keeps the result, `Esc` discards it.
+- **Edit** (off by default): after you draw a region it stays adjustable (handles, arrow keys, `Enter`), and after capturing an editor opens with pen, arrow, box, highlight and text, six colours, four sizes and undo. `Enter` keeps the result, `Esc` discards it.
+- **Follow mouse** (off by default): Monitor capture (the Monitor button and `Ctrl+PrtScn`) takes the monitor under the mouse straight away instead of asking which one.
 - Pressing the shortcut again while the bar is open closes it and opens a fresh one.
 - **Adjust** (toggle): after drawing a region you can drag its handles, drag inside to move it,
   nudge with the arrow keys (Shift = 10 px, Ctrl+arrows = resize), then press **Enter**, double-click, or click *Capture*.

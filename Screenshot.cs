@@ -235,8 +235,10 @@ namespace ScreenshotTool
 
         public static bool SaveFile = true;        // write a PNG file
         public static bool CopyClipboard = true;   // put the shot on the clipboard
-        public static bool Annotate = false;       // open the annotation editor after a capture
-        public static bool Adjust = true;          // let the selection be adjusted before capturing
+        public static bool Edit = false;           // adjust the selection before capturing, then annotate
+        public static bool Adjust { get { return Edit; } set { Edit = value; } }
+        public static bool Annotate { get { return Edit; } set { Edit = value; } }
+        public static bool MonitorFollow = false;  // Monitor capture takes the monitor under the mouse instead of asking
         public static int LastMode;                // last overlay mode: 0 = region, 1 = window, 2 = monitor
         public static int ClickTolerance = 12;     // px the mouse may move and still count as a click
 
@@ -249,8 +251,8 @@ namespace ScreenshotTool
                     if (k == null) return;
                     SaveFile = GetBool(k, "SaveFile", true);
                     CopyClipboard = GetBool(k, "CopyClipboard", true);
-                    Adjust = GetBool(k, "Adjust", true);
-                    Annotate = GetBool(k, "Annotate", false);
+                    Edit = GetBool(k, "Edit", false);
+                    MonitorFollow = GetBool(k, "MonitorFollow", false);
                     object lm = k.GetValue("LastMode");
                     if (lm is int && (int)lm >= 0 && (int)lm <= 2) LastMode = (int)lm;
                     else if (GetBool(k, "WindowModeLast", false)) LastMode = 1;
@@ -277,8 +279,8 @@ namespace ScreenshotTool
                 {
                     k.SetValue("SaveFile", SaveFile ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("CopyClipboard", CopyClipboard ? 1 : 0, RegistryValueKind.DWord);
-                    k.SetValue("Adjust", Adjust ? 1 : 0, RegistryValueKind.DWord);
-                    k.SetValue("Annotate", Annotate ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("Edit", Edit ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("MonitorFollow", MonitorFollow ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("LastMode", LastMode, RegistryValueKind.DWord);
                     k.SetValue("ClickTolerance", ClickTolerance, RegistryValueKind.DWord);
                 }
@@ -1108,15 +1110,22 @@ namespace ScreenshotTool
         {
             AddButton("Region", delegate { return mode == 0; }, delegate { SetMode(0); });
             AddButton("Window", delegate { return mode == 1; }, delegate { SetMode(1); });
-            AddButton("Monitor", delegate { return mode == 2; }, delegate { SetMode(2); });
+            AddButton("Monitor", delegate { return mode == 2 && !Settings.MonitorFollow; },
+                delegate { if (Settings.MonitorFollow) FinishRect(monitorClient); else SetMode(2); });
             AddButton("All monitors", null, delegate { Outcome = OverlayOutcome.AllMonitors; Close(); });
             AddSeparator();
-            AddButton("Adjust", delegate { return Settings.Adjust; },
-                delegate { Settings.Adjust = !Settings.Adjust; Settings.Save(); });
+            AddButton("Edit", delegate { return Settings.Edit; },
+                delegate { Settings.Edit = !Settings.Edit; Settings.Save(); });
             AddButton("Save", delegate { return Settings.SaveFile; }, delegate { Settings.ToggleSave(); });
             AddButton("Copy", delegate { return Settings.CopyClipboard; }, delegate { Settings.ToggleCopy(); });
-            AddButton("Annotate", delegate { return Settings.Annotate; },
-                delegate { Settings.Annotate = !Settings.Annotate; Settings.Save(); });
+            AddButton("Follow mouse", delegate { return Settings.MonitorFollow; },
+                delegate
+                {
+                    Settings.MonitorFollow = !Settings.MonitorFollow;
+                    Settings.Save();
+                    if (mode == 2 && Settings.MonitorFollow) SetMode(0);
+                    Invalidate();
+                });
             AddSeparator();
             AddButton("X", null, delegate { Cancel("X button"); });
 
@@ -1996,10 +2005,10 @@ namespace ScreenshotTool
             menu.Items.Add("Capture all monitors, same height  (Shift+PrtScn)", null, delegate { PostDelayed(CaptureMode.AllMonitors); });
             menu.Items.Add(new ToolStripSeparator());
 
-            ToolStripMenuItem adjustItem = new ToolStripMenuItem("Adjust selection before capturing");
-            adjustItem.Click += delegate { Settings.Adjust = !Settings.Adjust; Settings.Save(); };
-            ToolStripMenuItem annotateItem = new ToolStripMenuItem("Annotate after capturing");
-            annotateItem.Click += delegate { Settings.Annotate = !Settings.Annotate; Settings.Save(); };
+            ToolStripMenuItem adjustItem = new ToolStripMenuItem("Edit: adjust the selection, then annotate");
+            adjustItem.Click += delegate { Settings.Edit = !Settings.Edit; Settings.Save(); };
+            ToolStripMenuItem followItem = new ToolStripMenuItem("Monitor capture follows the mouse (no picking)");
+            followItem.Click += delegate { Settings.MonitorFollow = !Settings.MonitorFollow; Settings.Save(); };
             ToolStripMenuItem saveItem = new ToolStripMenuItem("Save to file");
             saveItem.Click += delegate { Settings.ToggleSave(); };
             ToolStripMenuItem copyItem = new ToolStripMenuItem("Copy to clipboard");
@@ -2007,7 +2016,7 @@ namespace ScreenshotTool
             menu.Items.Add(adjustItem);
             menu.Items.Add(saveItem);
             menu.Items.Add(copyItem);
-            menu.Items.Add(annotateItem);
+            menu.Items.Add(followItem);
 
             ToolStripMenuItem tolItem = new ToolStripMenuItem("Click tolerance (click = whole monitor)");
             int[] tolChoices = new int[] { 0, 5, 12, 25, 50 };
@@ -2038,7 +2047,7 @@ namespace ScreenshotTool
                 adjustItem.Checked = Settings.Adjust;
                 saveItem.Checked = Settings.SaveFile;
                 copyItem.Checked = Settings.CopyClipboard;
-                annotateItem.Checked = Settings.Annotate;
+                followItem.Checked = Settings.MonitorFollow;
                 foreach (ToolStripMenuItem t in tolItem.DropDownItems)
                 {
                     t.Checked = ((int)t.Tag == Settings.ClickTolerance);
@@ -2304,7 +2313,11 @@ namespace ScreenshotTool
                 Bitmap result = null;
                 Rectangle toastMonitor = CurrentMonitor();
 
-                if (mode == CaptureMode.AllMonitors)
+                if (mode == CaptureMode.Monitor && Settings.MonitorFollow)
+                {
+                    result = Grab(toastMonitor, PixelFormat.Format24bppRgb);
+                }
+                else if (mode == CaptureMode.AllMonitors)
                 {
                     result = GrabAllMonitors();
                 }
