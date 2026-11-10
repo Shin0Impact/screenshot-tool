@@ -2925,16 +2925,16 @@ namespace ScreenshotTool
     }
 
 #if !UIA
-    // The Screenshot.exe you download is a small launcher with the real app (a UIAccess build)
-    // embedded in it. The first time it runs it sets that build up once (one Windows permission
-    // prompt): a local certificate, the signed copy in Program Files and a start-at-logon task. A
-    // UIAccess app, unlike an ordinary one, can see keys typed into elevated windows (a game started
-    // as administrator) while still running as a normal user. After that, running the launcher just
-    // starts the installed copy; a newer launcher updates it. "Screenshot.exe --uninstall" removes it.
+    // Screenshot-Installer.exe is a launcher with two builds of the app embedded in it:
+    //  * with administrator support: a UIAccess build, signed with a local certificate and installed in
+    //    Program Files (one Windows permission prompt). UIAccess lets a normal-user app see keys typed
+    //    into administrator windows (a game started as administrator).
+    //  * without administrator support: the ordinary build in a folder of your choice, no prompt.
+    // Running the installer again offers to add administrator support, update, start or uninstall.
     static class Setup
     {
-        private const string UninstallKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ScreenshotTool";
-        private static string installDirOverride;
+        private const string UninstallKeyPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ScreenshotTool";
+        private const string RunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
         private static string ProgramFilesDir
         {
@@ -2942,18 +2942,29 @@ namespace ScreenshotTool
             {
                 string pf = Environment.GetEnvironmentVariable("ProgramW6432");
                 if (string.IsNullOrEmpty(pf)) pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-                return pf;
+                return pf.TrimEnd('\\');
             }
         }
 
-        private static string DefaultDir { get { return Path.Combine(ProgramFilesDir, "ScreenshotTool"); } }
+        private static string AdminDefaultDir { get { return Path.Combine(ProgramFilesDir, "ScreenshotTool"); } }
 
-        // Where Setup put the app last time (null if never installed).
-        private static string RegisteredDir()
+        private static string UserDefaultDir
+        {
+            get
+            {
+                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    @"Programs\ScreenshotTool");
+            }
+        }
+
+        private static string SetupLog { get { return Path.Combine(Path.GetTempPath(), "screenshot-setup.log"); } }
+
+        // Where a mode was installed, from its Uninstall registry entry (null = not installed).
+        private static string Registered(RegistryKey hive)
         {
             try
             {
-                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(UninstallKey))
+                using (RegistryKey k = hive.OpenSubKey(UninstallKeyPath))
                 {
                     if (k == null) return null;
                     string v = k.GetValue("InstallLocation") as string;
@@ -2963,35 +2974,41 @@ namespace ScreenshotTool
             catch (Exception) { return null; }
         }
 
-        private static string InstallDir
+        private static string AdminDir() { return Registered(Registry.LocalMachine); }
+        private static string UserDir() { return Registered(Registry.CurrentUser); }
+
+        private static bool HasApp(string dir)
         {
-            get
-            {
-                if (installDirOverride != null) return installDirOverride;
-                string r = RegisteredDir();
-                return r != null ? r : DefaultDir;
-            }
+            return dir != null && File.Exists(Path.Combine(dir, "Screenshot.exe"));
         }
 
-        // A UIAccess app only starts from a protected folder, so the location has to be a folder inside
-        // Program Files. It must not be Program Files itself: uninstalling deletes the whole folder.
-        private static bool IsUnderProgramFiles(string dir)
+        private static bool SameDir(string a, string b)
         {
             try
             {
-                string full = Path.GetFullPath(dir).TrimEnd('\\');
-                return full.StartsWith(ProgramFilesDir.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
+                return string.Equals(Path.GetFullPath(a).TrimEnd('\\'), Path.GetFullPath(b).TrimEnd('\\'),
+                    StringComparison.OrdinalIgnoreCase);
             }
             catch (Exception) { return false; }
         }
 
-        private static bool IsValidDir(string dir)
+        private static bool IsInside(string dir, string parent)
+        {
+            try
+            {
+                return Path.GetFullPath(dir).TrimEnd('\\').StartsWith(parent.TrimEnd('\\') + "\\",
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception) { return false; }
+        }
+
+        // A folder that is new, empty, or already holds this app; never the root of a drive.
+        private static bool IsUsableDir(string dir)
         {
             try
             {
                 string full = Path.GetFullPath(dir).TrimEnd('\\');
-                string pf = ProgramFilesDir.TrimEnd('\\');
-                if (!full.StartsWith(pf + "\\", StringComparison.OrdinalIgnoreCase)) return false;
+                if (full.Length < 4 || Path.GetPathRoot(full).TrimEnd('\\').Length == full.Length) return false;
                 if (Directory.Exists(full))
                 {
                     bool mine = File.Exists(Path.Combine(full, "version.txt"));
@@ -3002,100 +3019,9 @@ namespace ScreenshotTool
             catch (Exception) { return false; }
         }
 
-        // The installer window: where to install (text box + Browse), then Install / Run without setup / Cancel.
-        private class InstallerForm : Form
+        private static byte[] ReadEmbedded(string name)
         {
-            private readonly TextBox path = new TextBox();
-            private readonly Label problem = new Label();
-            public string Chosen = "";
-
-            public InstallerForm(string initial)
-            {
-                Text = "Screenshot installer";
-                FormBorderStyle = FormBorderStyle.FixedDialog;
-                MaximizeBox = false;
-                MinimizeBox = false;
-                StartPosition = FormStartPosition.CenterScreen;
-                Font = SystemFonts.MessageBoxFont;
-                ClientSize = new Size(560, 250);
-                TopMost = true;
-
-                Label intro = new Label();
-                intro.SetBounds(16, 14, 528, 78);
-                intro.Text = "Screenshot needs a one-time setup so its hotkeys also work over games and other programs "
-                    + "that run as administrator. Windows will ask for permission once; after that it starts "
-                    + "normally, with no prompts.";
-                Controls.Add(intro);
-
-                Label where = new Label();
-                where.SetBounds(16, 98, 528, 20);
-                where.Text = "Install folder (must be inside Program Files):";
-                Controls.Add(where);
-
-                path.SetBounds(16, 122, 432, 24);
-                path.Text = initial;
-                Controls.Add(path);
-
-                Button browse = new Button();
-                browse.SetBounds(456, 120, 88, 28);
-                browse.Text = "Browse...";
-                browse.Click += delegate
-                {
-                    using (FolderBrowserDialog fb = new FolderBrowserDialog())
-                    {
-                        fb.Description = "Choose the install folder (inside Program Files).";
-                        fb.ShowNewFolderButton = true;
-                        try { if (Directory.Exists(path.Text)) fb.SelectedPath = path.Text; } catch (Exception) { }
-                        if (fb.ShowDialog(this) == DialogResult.OK) { path.Text = fb.SelectedPath; problem.Text = ""; }
-                    }
-                };
-                Controls.Add(browse);
-
-                problem.SetBounds(16, 152, 528, 36);
-                problem.ForeColor = Color.Firebrick;
-                Controls.Add(problem);
-
-                Button install = new Button();
-                install.SetBounds(16, 204, 120, 32);
-                install.Text = "Install";
-                install.Click += delegate
-                {
-                    string p = path.Text.Trim();
-                    if (!IsValidDir(p))
-                    {
-                        problem.Text = "Please use a new or empty folder inside " + ProgramFilesDir
-                            + " (for example " + DefaultDir + ").";
-                        return;
-                    }
-                    Chosen = Path.GetFullPath(p).TrimEnd('\\');
-                    DialogResult = DialogResult.OK;
-                };
-                Controls.Add(install);
-
-                Button without = new Button();
-                without.SetBounds(146, 204, 280, 32);
-                without.Text = "Run without setup (no admin-window support)";
-                without.Click += delegate { DialogResult = DialogResult.Ignore; };
-                Controls.Add(without);
-
-                Button cancel = new Button();
-                cancel.SetBounds(436, 204, 108, 32);
-                cancel.Text = "Cancel";
-                cancel.Click += delegate { DialogResult = DialogResult.Cancel; };
-                Controls.Add(cancel);
-
-                AcceptButton = install;
-                CancelButton = cancel;
-            }
-        }
-
-        private static string InstalledExe { get { return Path.Combine(InstallDir, "Screenshot.exe"); } }
-        private static string VersionFile { get { return Path.Combine(InstallDir, "version.txt"); } }
-        private static string SetupLog { get { return Path.Combine(Path.GetTempPath(), "screenshot-setup.log"); } }
-
-        private static byte[] ReadEmbedded()
-        {
-            using (Stream s = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("UIAccessBuild.exe"))
+            using (Stream s = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(name))
             {
                 if (s == null) return null;
                 byte[] data = new byte[s.Length];
@@ -3121,18 +3047,13 @@ namespace ScreenshotTool
             }
         }
 
-        private static bool IsCurrent(string version)
+        private static bool VersionMatches(string dir, string version)
         {
-            try
-            {
-                return File.Exists(InstalledExe) && File.Exists(VersionFile)
-                    && File.ReadAllText(VersionFile).Trim() == version
-                    && CertTrusted();
-            }
+            try { return HasApp(dir) && File.ReadAllText(Path.Combine(dir, "version.txt")).Trim() == version; }
             catch (Exception) { return false; }
         }
 
-        // The installed copy only starts while its signing certificate is trusted on this computer.
+        // The administrator build only starts while its signing certificate is trusted on this computer.
         private static bool CertTrusted()
         {
             try
@@ -3155,15 +3076,15 @@ namespace ScreenshotTool
             catch (Exception) { return false; }
         }
 
-        private static bool LaunchInstalled()
+        private static bool StartApp(string dir)
         {
             try
             {
                 // Through the shell (like a double-click): a UIAccess exe cannot be started with a plain
                 // CreateProcess call, which fails with "The requested operation requires elevation".
-                ProcessStartInfo psi = new ProcessStartInfo(InstalledExe);
+                ProcessStartInfo psi = new ProcessStartInfo(Path.Combine(dir, "Screenshot.exe"));
                 psi.UseShellExecute = true;
-                psi.WorkingDirectory = InstallDir;
+                psi.WorkingDirectory = dir;
                 Process.Start(psi);
                 return true;
             }
@@ -3212,8 +3133,9 @@ namespace ScreenshotTool
             }
         }
 
-        // Runs elevated (started with "runas" by the launcher).
-        private static int Install(byte[] data, string version, int parentPid, string oldDir)
+        // ---- administrator install (runs elevated, started with "runas" by the installer window) ----
+
+        private static int InstallAdmin(byte[] data, string version, int parentPid, string dir, string oldDir)
         {
             string output = "";
             int code = 1;
@@ -3261,7 +3183,7 @@ try {
   Write-Output ('FAILED: ' + $_.Exception.Message)
   exit 1
 }
-".Replace("__SRC__", Q(tmp)).Replace("__DIR__", Q(InstallDir)).Replace("__VER__", Q(version)).Replace("__USER__", Q(user)).Replace("__LAUNCHER__", Q(Application.ExecutablePath)).Replace("__OLD__", Q(oldDir ?? ""));
+".Replace("__SRC__", Q(tmp)).Replace("__DIR__", Q(dir)).Replace("__VER__", Q(version)).Replace("__USER__", Q(user)).Replace("__LAUNCHER__", Q(Application.ExecutablePath)).Replace("__OLD__", Q(oldDir ?? ""));
                 code = RunPowerShell(script, out output);
             }
             catch (Exception ex)
@@ -3277,14 +3199,14 @@ try {
             return code;
         }
 
-        private static int Uninstall(int parentPid)
+        private static int UninstallAdmin(int parentPid)
         {
             string output = "";
             try
             {
                 KillOthers(parentPid);
-                string target = InstallDir;
-                if (!IsUnderProgramFiles(target)) target = DefaultDir;
+                string target = AdminDir();
+                if (target == null || !IsInside(target, ProgramFilesDir)) target = AdminDefaultDir;
                 string script = @"
 $ErrorActionPreference = 'Continue'
 $subject = 'CN=Screenshot Tool (local)'
@@ -3307,125 +3229,421 @@ Write-Output 'OK'
             }
         }
 
-        // Starts this same exe elevated with the given argument and waits. Returns -2 if the user said no.
-        private static int RunElevated(string argument, string dir)
+        // ---- standard install (no administrator rights needed) ----
+
+        // Returns null on success, otherwise a message.
+        private static string InstallUser(byte[] data, string version, string dir, string oldDir)
+        {
+            try
+            {
+                KillOthers(0);
+                if (oldDir != null && !SameDir(oldDir, dir) && Directory.Exists(oldDir)) TryDeleteDir(oldDir);
+                Directory.CreateDirectory(dir);
+                string exe = Path.Combine(dir, "Screenshot.exe");
+                File.WriteAllBytes(exe, data);
+                File.Copy(Application.ExecutablePath, Path.Combine(dir, "Uninstall.exe"), true);
+                File.WriteAllText(Path.Combine(dir, "version.txt"), version);
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(UninstallKeyPath))
+                {
+                    k.SetValue("DisplayName", "Screenshot");
+                    k.SetValue("Publisher", "Shin0Impact");
+                    k.SetValue("DisplayVersion", version);
+                    k.SetValue("DisplayIcon", exe);
+                    k.SetValue("InstallLocation", dir);
+                    k.SetValue("UninstallString", "\"" + Path.Combine(dir, "Uninstall.exe") + "\" --uninstall");
+                    k.SetValue("NoModify", 1, RegistryValueKind.DWord);
+                    k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+                }
+                using (RegistryKey r = Registry.CurrentUser.CreateSubKey(RunPath))
+                    r.SetValue("ScreenshotTool", "\"" + exe + "\"");
+                return null;
+            }
+            catch (Exception ex) { return ex.Message; }
+        }
+
+        private static void TryDeleteDir(string dir)
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                try { if (Directory.Exists(dir)) Directory.Delete(dir, true); return; }
+                catch (Exception) { Thread.Sleep(300); }
+            }
+        }
+
+        private static void UninstallUser(string dir)
+        {
+            KillOthers(0);
+            try
+            {
+                using (RegistryKey r = Registry.CurrentUser.OpenSubKey(RunPath, true))
+                    if (r != null) r.DeleteValue("ScreenshotTool", false);
+            }
+            catch (Exception) { }
+            try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKeyPath, false); } catch (Exception) { }
+            if (dir != null) TryDeleteDir(dir);
+        }
+
+        // ---- plumbing ----
+
+        // Starts this same exe elevated with the given argument and waits (keeping a small window alive).
+        // Returns -2 if the user said no.
+        private static int RunElevated(string argument, string dir, string busyText)
         {
             ProcessStartInfo psi = new ProcessStartInfo(Application.ExecutablePath,
                 argument + " " + Process.GetCurrentProcess().Id + (dir != null ? " \"" + dir + "\"" : ""));
             psi.Verb = "runas";
             psi.UseShellExecute = true;
+            Form busy = null;
             try
             {
                 using (Process p = Process.Start(psi))
                 {
-                    p.WaitForExit();
+                    busy = BusyWindow(busyText);
+                    while (!p.WaitForExit(40)) Application.DoEvents();
                     return p.ExitCode;
                 }
             }
             catch (System.ComponentModel.Win32Exception) { return -2; }
+            finally { if (busy != null) { busy.Close(); busy.Dispose(); } }
         }
 
-        // Returns true when the app should simply start in this process (no embedded build, or the
-        // user chose to skip the setup).
+        private static Form BusyWindow(string text)
+        {
+            Form f = new Form();
+            f.Text = "Screenshot";
+            f.FormBorderStyle = FormBorderStyle.FixedDialog;
+            f.ControlBox = false;
+            f.StartPosition = FormStartPosition.CenterScreen;
+            f.Font = SystemFonts.MessageBoxFont;
+            f.ClientSize = new Size(420, 96);
+            f.TopMost = true;
+            Label l = new Label();
+            l.SetBounds(16, 14, 388, 36);
+            l.Text = text;
+            f.Controls.Add(l);
+            ProgressBar pb = new ProgressBar();
+            pb.SetBounds(16, 58, 388, 18);
+            pb.Style = ProgressBarStyle.Marquee;
+            pb.MarqueeAnimationSpeed = 30;
+            f.Controls.Add(pb);
+            f.Show();
+            f.Refresh();
+            return f;
+        }
+
+        private static string ReadSetupLog()
+        {
+            string detail = "";
+            try { detail = File.ReadAllText(SetupLog); } catch (Exception) { }
+            try { File.Delete(SetupLog); } catch (Exception) { }
+            return detail;
+        }
+
+        // ---- the installer window ----
+
+        private class InstallerForm : Form
+        {
+            private readonly TextBox path = new TextBox();
+            private readonly Label problem = new Label();
+            private readonly RadioButton adminRadio = new RadioButton();
+            private readonly RadioButton userRadio = new RadioButton();
+            public string Action = "close";
+            public string Chosen = "";
+
+            private void AddButton(string text, string action, int x, int y, int w)
+            {
+                Button b = new Button();
+                b.SetBounds(x, y, w, 32);
+                b.Text = text;
+                b.Click += delegate { Action = action; DialogResult = DialogResult.OK; };
+                Controls.Add(b);
+            }
+
+            public InstallerForm(string adminDir, string userDir, bool adminCurrent, bool userCurrent)
+            {
+                Text = "Screenshot installer";
+                FormBorderStyle = FormBorderStyle.FixedDialog;
+                MaximizeBox = false;
+                MinimizeBox = false;
+                StartPosition = FormStartPosition.CenterScreen;
+                Font = SystemFonts.MessageBoxFont;
+                TopMost = true;
+
+                Label head = new Label();
+                head.SetBounds(16, 14, 548, 80);
+                Controls.Add(head);
+
+                if (adminDir == null && userDir == null)
+                {
+                    ClientSize = new Size(580, 330);
+                    head.Text = "Install Screenshot. Administrator support lets the hotkeys work over games and other "
+                        + "programs that run as administrator. Windows asks for permission once; after that the app "
+                        + "starts normally, with no prompts.";
+
+                    adminRadio.SetBounds(16, 96, 548, 22);
+                    adminRadio.Text = "With administrator support (asks Windows for permission once)";
+                    adminRadio.Checked = true;
+                    adminRadio.CheckedChanged += delegate { SwitchDefault(); };
+                    Controls.Add(adminRadio);
+
+                    userRadio.SetBounds(16, 122, 548, 22);
+                    userRadio.Text = "Without administrator support (no permission needed)";
+                    userRadio.CheckedChanged += delegate { SwitchDefault(); };
+                    Controls.Add(userRadio);
+
+                    Label where = new Label();
+                    where.SetBounds(16, 160, 548, 20);
+                    where.Text = "Install folder:";
+                    Controls.Add(where);
+
+                    path.SetBounds(16, 184, 456, 24);
+                    path.Text = AdminDefaultDir;
+                    Controls.Add(path);
+
+                    Button browse = new Button();
+                    browse.SetBounds(480, 182, 84, 28);
+                    browse.Text = "Browse...";
+                    browse.Click += delegate
+                    {
+                        using (FolderBrowserDialog fb = new FolderBrowserDialog())
+                        {
+                            fb.Description = "Choose the install folder.";
+                            fb.ShowNewFolderButton = true;
+                            try { if (Directory.Exists(path.Text)) fb.SelectedPath = path.Text; } catch (Exception) { }
+                            if (fb.ShowDialog(this) == DialogResult.OK) { path.Text = fb.SelectedPath; problem.Text = ""; }
+                        }
+                    };
+                    Controls.Add(browse);
+
+                    problem.SetBounds(16, 216, 548, 40);
+                    problem.ForeColor = Color.Firebrick;
+                    Controls.Add(problem);
+
+                    Button install = new Button();
+                    install.SetBounds(16, 280, 120, 32);
+                    install.Text = "Install";
+                    install.Click += delegate { TryInstall(); };
+                    Controls.Add(install);
+
+                    Button cancel = new Button();
+                    cancel.SetBounds(444, 280, 120, 32);
+                    cancel.Text = "Cancel";
+                    cancel.Click += delegate { Action = "close"; DialogResult = DialogResult.Cancel; };
+                    Controls.Add(cancel);
+
+                    AcceptButton = install;
+                    CancelButton = cancel;
+                    return;
+                }
+
+                ClientSize = new Size(580, 190);
+                bool admin = adminDir != null;
+                bool current = admin ? adminCurrent : userCurrent;
+                head.Text = admin
+                    ? "Screenshot is installed with administrator support."
+                    : "Screenshot is installed without administrator support. Its hotkeys do not work over "
+                        + "programs that run as administrator.";
+                if (!current) head.Text += "\r\n\r\nThe installed copy needs an update or repair.";
+
+                int x = 16;
+                if (!admin) { AddButton("Add administrator support", "addadmin", x, 120, 200); x += 208; }
+                if (!current) { AddButton("Update", "update", x, 120, 96); x += 104; }
+                else { AddButton("Start Screenshot", "start", x, 120, 140); x += 148; }
+                AddButton("Uninstall", "uninstall", x, 120, 100);
+                Button close = new Button();
+                close.SetBounds(464, 120, 100, 32);
+                close.Text = "Close";
+                close.Click += delegate { Action = "close"; DialogResult = DialogResult.Cancel; };
+                Controls.Add(close);
+                CancelButton = close;
+            }
+
+            private void SwitchDefault()
+            {
+                string t = path.Text.Trim();
+                if (adminRadio.Checked && SameDir(t, UserDefaultDir)) path.Text = AdminDefaultDir;
+                else if (userRadio.Checked && SameDir(t, AdminDefaultDir)) path.Text = UserDefaultDir;
+            }
+
+            private void TryInstall()
+            {
+                string p = path.Text.Trim();
+                bool admin = adminRadio.Checked;
+                if (p.Length == 0 || !IsUsableDir(p))
+                {
+                    problem.Text = "Please use a new or empty folder.";
+                    return;
+                }
+                if (admin && !IsInside(p, ProgramFilesDir))
+                {
+                    problem.Text = "With administrator support the folder must be inside " + ProgramFilesDir
+                        + " (for example " + AdminDefaultDir + "). Windows only trusts programs there.";
+                    return;
+                }
+                if (!admin && IsInside(p, ProgramFilesDir))
+                {
+                    problem.Text = "Without administrator support please choose a folder outside Program Files "
+                        + "(for example " + UserDefaultDir + ").";
+                    return;
+                }
+                Chosen = Path.GetFullPath(p).TrimEnd('\\');
+                Action = admin ? "install-admin" : "install-user";
+                DialogResult = DialogResult.OK;
+            }
+        }
+
+        // ---- uninstall ----
+
+        private static void DoUninstall()
+        {
+            string adminDir = AdminDir();
+            string userDir = UserDir();
+            string self = Application.ExecutablePath;
+            string copy = Path.Combine(Path.GetTempPath(), "ScreenUninstall.exe");
+            if ((adminDir != null && IsInside(self, adminDir)) || (userDir != null && IsInside(self, userDir)))
+            {
+                // Running from a folder that is about to be deleted: continue from a temporary copy.
+                try
+                {
+                    File.Copy(self, copy, true);
+                    ProcessStartInfo again = new ProcessStartInfo(copy, "--uninstall");
+                    again.UseShellExecute = true;
+                    Process.Start(again);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Could not start the uninstaller:\r\n" + ex.Message, "Screenshot",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                return;
+            }
+
+            bool ok = true;
+            bool cancelled = false;
+            if (adminDir != null)
+            {
+                int rc = RunElevated("--uninstall-elevated", null, "Removing Screenshot... this can take a few seconds.");
+                try { File.Delete(SetupLog); } catch (Exception) { }
+                if (rc == -2) cancelled = true;
+                else if (rc != 0) ok = false;
+            }
+            if (!cancelled && userDir != null) UninstallUser(userDir);
+
+            MessageBox.Show(cancelled ? "Nothing was removed (Windows permission was declined)."
+                : ok ? "Screenshot was removed." : "Could not remove everything.",
+                "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            if (string.Equals(self, copy, StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    ProcessStartInfo del = new ProcessStartInfo("cmd.exe",
+                        "/c ping -n 3 127.0.0.1 >nul & del \"" + copy + "\"");
+                    del.CreateNoWindow = true;
+                    del.UseShellExecute = false;
+                    Process.Start(del);
+                }
+                catch (Exception) { }
+            }
+        }
+
+        // Returns true when the app should simply start in this process (built without the embedded
+        // builds, e.g. with build.bat).
         public static bool Handle(string[] args)
         {
-            byte[] data = ReadEmbedded();
-            if (data == null) return true;   // built without the embedded app (build.bat): run directly
-            string version = VersionOf(data);
+            byte[] adminData = ReadEmbedded("UIAccessBuild.exe");
+            byte[] userData = ReadEmbedded("StandardBuild.exe");
+            if (adminData == null || userData == null) return true;
+            string adminVer = VersionOf(adminData);
+            string userVer = VersionOf(userData);
             string cmd = args.Length > 0 ? args[0] : "";
-            bool asUninstaller = string.Equals(Path.GetFileName(Application.ExecutablePath), "Uninstall.exe", StringComparison.OrdinalIgnoreCase);
-            if (asUninstaller && cmd == "")
-            {
-                // Double-clicked "Uninstall.exe": that always means uninstall.
-                Application.EnableVisualStyles();
-                if (MessageBox.Show("Remove Screenshot from this computer?", "Screenshot",
-                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return false;
-                cmd = "--uninstall";
-            }
             int parent = 0;
             if (args.Length > 1) int.TryParse(args[1], out parent);
 
             if (cmd == "--install-elevated")
             {
-                string old = RegisteredDir();
-                if (args.Length > 2) installDirOverride = args[2];
-                Environment.ExitCode = Install(data, version, parent, old);
+                string old = AdminDir();
+                string dir = args.Length > 2 ? args[2] : AdminDefaultDir;
+                Environment.ExitCode = InstallAdmin(adminData, adminVer, parent, dir, old);
                 return false;
             }
-            if (cmd == "--uninstall-elevated") { Environment.ExitCode = Uninstall(parent); return false; }
+            if (cmd == "--uninstall-elevated") { Environment.ExitCode = UninstallAdmin(parent); return false; }
 
             Application.EnableVisualStyles();
-            if (cmd == "--uninstall")
+            bool asUninstaller = string.Equals(Path.GetFileName(Application.ExecutablePath), "Uninstall.exe",
+                StringComparison.OrdinalIgnoreCase);
+            if (asUninstaller && cmd == "")
             {
-                string self = Application.ExecutablePath;
-                string copy = Path.Combine(Path.GetTempPath(), "ScreenUninstall.exe");
-                if (self.StartsWith(InstallDir, StringComparison.OrdinalIgnoreCase))
-                {
-                    // Running from the folder that is about to be deleted: continue from a temporary copy.
-                    try
-                    {
-                        File.Copy(self, copy, true);
-                        ProcessStartInfo again = new ProcessStartInfo(copy, "--uninstall");
-                        again.UseShellExecute = true;
-                        Process.Start(again);
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show("Could not start the uninstaller:\r\n" + ex.Message, "Screenshot",
-                            MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
-                    return false;
-                }
-                int rc = RunElevated("--uninstall-elevated", null);
-                try { File.Delete(SetupLog); } catch (Exception) { }
-                MessageBox.Show(rc == 0 ? "Screenshot was removed." : "Could not remove it.",
-                    "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                if (string.Equals(self, copy, StringComparison.OrdinalIgnoreCase))
-                {
-                    try
-                    {
-                        ProcessStartInfo del = new ProcessStartInfo("cmd.exe",
-                            "/c ping -n 3 127.0.0.1 >nul & del \"" + copy + "\"");
-                        del.CreateNoWindow = true;
-                        del.UseShellExecute = false;
-                        Process.Start(del);
-                    }
-                    catch (Exception) { }
-                }
-                return false;
+                if (MessageBox.Show("Remove Screenshot from this computer?", "Screenshot",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return false;
+                cmd = "--uninstall";
             }
-
-            if (IsCurrent(version) && LaunchInstalled()) return false;
+            if (cmd == "--uninstall") { DoUninstall(); return false; }
 
             for (;;)
             {
-                DialogResult choice;
+                string adminDir = HasApp(AdminDir()) ? AdminDir() : null;
+                string userDir = HasApp(UserDir()) ? UserDir() : null;
+                if (adminDir != null) userDir = null;   // the administrator install wins if both exist
+                bool adminCurrent = adminDir != null && VersionMatches(adminDir, adminVer) && CertTrusted();
+                bool userCurrent = userDir != null && VersionMatches(userDir, userVer);
+
+                string action;
                 string chosen;
-                using (InstallerForm form = new InstallerForm(InstallDir))
+                using (InstallerForm form = new InstallerForm(adminDir, userDir, adminCurrent, userCurrent))
                 {
-                    choice = form.ShowDialog();
+                    form.ShowDialog();
+                    action = form.Action;
                     chosen = form.Chosen;
                 }
-                if (choice == DialogResult.Cancel) return false;
-                if (choice == DialogResult.Ignore) return true;   // run without the setup
 
-                installDirOverride = chosen;
-                int result = RunElevated("--install-elevated", chosen);
-                if (result == -2) continue;   // Windows permission refused: back to the installer window
-                if (IsCurrent(version))
+                if (action == "close") return false;
+                if (action == "start")
                 {
-                    try { File.Delete(SetupLog); } catch (Exception) { }
-                    if (LaunchInstalled()) return false;
+                    if (StartApp(adminDir != null ? adminDir : userDir)) return false;
+                    MessageBox.Show("Could not start Screenshot.", "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    continue;
                 }
-                break;
-            }
+                if (action == "uninstall")
+                {
+                    if (MessageBox.Show("Remove Screenshot from this computer?", "Screenshot",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) continue;
+                    DoUninstall();
+                    return false;
+                }
 
-            string detail = "";
-            try { detail = File.ReadAllText(SetupLog); } catch (Exception) { }
-            try { File.Delete(SetupLog); } catch (Exception) { }
-            MessageBox.Show("The setup did not finish, so Screenshot will run without it this time.\r\n\r\n" + detail,
-                "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return true;
+                bool admin = action == "install-admin" || action == "addadmin" || (action == "update" && adminDir != null);
+                if (admin)
+                {
+                    string dir = action == "install-admin" ? chosen : (adminDir != null ? adminDir : AdminDefaultDir);
+                    int rc = RunElevated("--install-elevated", dir, "Setting up Screenshot... the first time this can take up to a minute.");
+                    if (rc == -2) continue;   // Windows permission refused: back to the window
+                    string aDir = AdminDir();
+                    if (HasApp(aDir) && VersionMatches(aDir, adminVer))
+                    {
+                        try { File.Delete(SetupLog); } catch (Exception) { }
+                        string u = UserDir();
+                        if (u != null) UninstallUser(u);   // moved to the administrator install
+                        if (StartApp(aDir)) return false;
+                        MessageBox.Show("Installed, but could not start it. Try again from the installer.",
+                            "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        continue;
+                    }
+                    MessageBox.Show("The setup did not finish.\r\n\r\n" + ReadSetupLog(), "Screenshot",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    continue;
+                }
+
+                string target = action == "install-user" ? chosen : userDir;
+                string error = InstallUser(userData, userVer, target, UserDir());
+                if (error != null)
+                {
+                    MessageBox.Show("The install did not finish.\r\n\r\n" + error, "Screenshot",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    continue;
+                }
+                if (StartApp(target)) return false;
+            }
         }
     }
 #endif

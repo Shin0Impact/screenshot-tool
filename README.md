@@ -67,17 +67,19 @@ administrator, Task Manager, ...), so ordinary hotkeys do nothing there and Wind
 Tool opens instead. A "UIAccess" program is allowed to, without being elevated itself, but Windows
 only starts one that is signed with a trusted certificate and installed in Program Files.
 
-`Screenshot-Installer.exe` takes care of that by itself:
+`Screenshot-Installer.exe` takes care of that by itself. Double-click it and choose:
 
-1. Double-click it. The first time it asks to do a one-time setup and Windows shows **one**
-   permission prompt.
-2. It creates a local self-signed certificate (trusted on this PC, only used for this exe), installs
-   a signed copy of the app to `C:\Program Files\ScreenshotTool`, and sets it to start at logon, not
-   elevated.
-3. From then on, running the installer again just starts the installed copy. A newer
-   installer updates it the same way (one prompt again). The installer window has a text box for the install folder (default `C:\Program Files\ScreenshotTool`, with Browse... to pick one); it has to be inside Program Files for the administrator-window support. Declining the Windows permission prompt brings the window back.
-4. To remove it: Settings > Apps > "Screenshot", the tray menu's "Uninstall...", or `Uninstall.exe` in the install folder. It removes the app, the startup task and the certificate.
+- **With administrator support** (default): asks Windows for permission once, creates a local
+  self-signed certificate (trusted on this PC, only used for this app), installs a signed copy to a
+  folder inside Program Files (default `C:\Program Files\ScreenshotTool`) and starts it at logon,
+  not elevated.
+- **Without administrator support**: no permission prompt; installs the ordinary build to a folder
+  you choose (default `%LOCALAPPDATA%\Programs\ScreenshotTool`). Hotkeys then do not work over
+  programs that run as administrator.
 
-Choosing *No* at the first prompt runs the app without the setup: everything works except over
-administrator windows. The app writes no logs.
+The install folder is a text box with a Browse... button. Running the installer again offers to add
+administrator support (for a standard install), update, start or uninstall. To remove it you can also use
+Settings > Apps > "Screenshot", the tray menu's "Uninstall...", or `Uninstall.exe` in the install folder.
+It removes the app, the startup entry and (for the administrator install) the certificate. The app writes
+no logs.
 `build.bat` makes a plain build with no setup step, for development.

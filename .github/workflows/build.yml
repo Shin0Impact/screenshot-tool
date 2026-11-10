@@ -22,12 +22,21 @@ jobs:
           /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll
           Screenshot.cs
 
-      - name: Compile Screenshot-Installer.exe (launcher with the UIAccess build embedded)
+      - name: Compile the standard build (installed when administrator support is not wanted)
+        shell: cmd
+        run: >
+          "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /optimize+ /define:UIA
+          /target:winexe /out:Screenshot-Standard.exe /win32manifest:app.manifest
+          /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll
+          Screenshot.cs
+
+      - name: Compile Screenshot-Installer.exe (launcher with both builds embedded)
         shell: cmd
         run: >
           "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /optimize+
           /target:winexe /out:Screenshot-Installer.exe /win32manifest:app.manifest
           /resource:Screenshot-UIAccess.exe,UIAccessBuild.exe
+          /resource:Screenshot-Standard.exe,StandardBuild.exe
           /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll
           Screenshot.cs
 
@@ -44,4 +53,4 @@ jobs:
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest Screenshot-Installer.exe --target "$GITHUB_SHA" \
             --title "Latest build" \
-            --notes "Screenshot-Installer.exe built from commit $GITHUB_SHA. Double-click it: first run does a one-time setup."
+            --notes "Screenshot-Installer.exe built from commit $GITHUB_SHA. Double-click it to install (with or without administrator support)."
