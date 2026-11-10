@@ -1412,6 +1412,7 @@ namespace ScreenshotTool
             try { Close(); } catch (Exception) { }
         }
 
+        public double AgeSeconds { get { return (DateTime.UtcNow - created).TotalSeconds; } }
         public bool NeverShown { get { return !Visible && (DateTime.UtcNow - created).TotalSeconds > 2; } }
 
         // Follow mouse: the window that was under the mouse when the shortcut was pressed.
@@ -2841,11 +2842,14 @@ namespace ScreenshotTool
                     + ", annotate=" + (a != null && !a.IsDisposed) + ", busy for " + (int)(DateTime.UtcNow - busySince).TotalSeconds + " s");
                 if (o != null && !o.IsDisposed)
                 {
-                    if (o.NeverShown || !o.Visible)
+                    bool alive = o.IsHandleCreated && o.Visible;
+                    if (o.NeverShown || (!alive && o.AgeSeconds > 1.5) || (!o.IsHandleCreated && o.AgeSeconds > 0.5))
                     {
-                        // An overlay that exists but is not on screen would swallow every press: close it and start over.
-                        Diag.Log("overlay is not on screen: closing it and starting over");
+                        // An overlay that exists but is not really on screen would swallow every press: drop it and start over.
+                        Diag.Log("overlay is not on screen (handle=" + o.IsHandleCreated + " visible=" + o.Visible + " age=" + o.AgeSeconds.ToString("0.0") + " s): dropping it and starting over");
                         o.ForceClose();
+                        busy = false;
+                        openOverlay = null;
                         Post(mode);
                     }
                     else o.RestartFresh();
