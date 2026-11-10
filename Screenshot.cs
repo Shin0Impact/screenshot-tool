@@ -1025,6 +1025,8 @@ namespace ScreenshotTool
         public int DelaySeconds;
         public int RestartMode;
         public string CloseReason = "";
+        private bool restartPending;
+        private readonly DateTime created = DateTime.UtcNow;
 
         public SelectionForm(Bitmap desktopShot, Rectangle screenBounds, List<Rectangle> windowRects,
             List<Rectangle> monitorRects, Rectangle toolbarMonitorScreen, int startMode)
@@ -1222,12 +1224,26 @@ namespace ScreenshotTool
         // Shortcut pressed again while open: close and reopen on a fresh screenshot.
         public void RestartFresh()
         {
+            // Pressed again before the window is on screen (the shortcut was spammed): remember it and
+            // restart as soon as the window is up, instead of closing a window that does not exist yet.
+            if (!IsHandleCreated || !Visible) { restartPending = true; return; }
             CloseReason = "shortcut again";
             Outcome = OverlayOutcome.DelayRestart;
             DelaySeconds = 0;
             RestartMode = mode;
-            Close();
+            try { Close(); } catch (Exception) { ForceClose(); }
         }
+
+        // Last resort for an overlay that never came up: end its dialog so the app can capture again.
+        public void ForceClose()
+        {
+            try { Outcome = OverlayOutcome.Cancelled; CloseReason = "forced"; } catch (Exception) { }
+            try { DialogResult = DialogResult.Cancel; } catch (Exception) { }
+            try { Hide(); } catch (Exception) { }
+            try { Close(); } catch (Exception) { }
+        }
+
+        public bool NeverShown { get { return !Visible && (DateTime.UtcNow - created).TotalSeconds > 2; } }
 
         // Follow mouse: the window that was under the mouse when the shortcut was pressed.
         private void FinishFollowWindow()
@@ -1288,6 +1304,11 @@ namespace ScreenshotTool
             TakeForeground();
             Activate();
             Focus();
+            if (restartPending)
+            {
+                restartPending = false;
+                BeginInvoke(new Action(RestartFresh));
+            }
             // A game in front may fight for the top spot: check a moment later and re-assert.
             System.Windows.Forms.Timer check = new System.Windows.Forms.Timer();
             check.Interval = 150;
@@ -2309,7 +2330,12 @@ namespace ScreenshotTool
             if (busy)
             {
                 // Pressing the shortcut again while the overlay is open starts a fresh capture.
-                if (openOverlay != null && !openOverlay.IsDisposed) openOverlay.RestartFresh();
+                SelectionForm o = openOverlay;
+                if (o != null && !o.IsDisposed)
+                {
+                    if (o.NeverShown) o.ForceClose();   // stuck: it never appeared, so free the app
+                    else o.RestartFresh();
+                }
                 return;
             }
             busy = true;
