@@ -3002,21 +3002,90 @@ namespace ScreenshotTool
             catch (Exception) { return false; }
         }
 
-        private static string ChooseDir()
+        // The installer window: where to install (text box + Browse), then Install / Run without setup / Cancel.
+        private class InstallerForm : Form
         {
-            while (true)
+            private readonly TextBox path = new TextBox();
+            private readonly Label problem = new Label();
+            public string Chosen = "";
+
+            public InstallerForm(string initial)
             {
-                using (FolderBrowserDialog fb = new FolderBrowserDialog())
+                Text = "Screenshot installer";
+                FormBorderStyle = FormBorderStyle.FixedDialog;
+                MaximizeBox = false;
+                MinimizeBox = false;
+                StartPosition = FormStartPosition.CenterScreen;
+                Font = SystemFonts.MessageBoxFont;
+                ClientSize = new Size(560, 250);
+                TopMost = true;
+
+                Label intro = new Label();
+                intro.SetBounds(16, 14, 528, 78);
+                intro.Text = "Screenshot needs a one-time setup so its hotkeys also work over games and other programs "
+                    + "that run as administrator. Windows will ask for permission once; after that it starts "
+                    + "normally, with no prompts.";
+                Controls.Add(intro);
+
+                Label where = new Label();
+                where.SetBounds(16, 98, 528, 20);
+                where.Text = "Install folder (must be inside Program Files):";
+                Controls.Add(where);
+
+                path.SetBounds(16, 122, 432, 24);
+                path.Text = initial;
+                Controls.Add(path);
+
+                Button browse = new Button();
+                browse.SetBounds(456, 120, 88, 28);
+                browse.Text = "Browse...";
+                browse.Click += delegate
                 {
-                    fb.Description = "Where should Screenshot be installed? It must be a folder inside Program Files "
-                        + "so that Windows lets it see keys typed into administrator windows. The default is fine for most people.";
-                    fb.SelectedPath = InstallDir;
-                    fb.ShowNewFolderButton = true;
-                    if (fb.ShowDialog() != DialogResult.OK) return null;
-                    if (IsValidDir(fb.SelectedPath)) return Path.GetFullPath(fb.SelectedPath).TrimEnd('\\');
-                }
-                MessageBox.Show("Please choose a new or empty folder inside\r\n" + ProgramFilesDir
-                    + "\r\n(for example " + DefaultDir + ").", "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    using (FolderBrowserDialog fb = new FolderBrowserDialog())
+                    {
+                        fb.Description = "Choose the install folder (inside Program Files).";
+                        fb.ShowNewFolderButton = true;
+                        try { if (Directory.Exists(path.Text)) fb.SelectedPath = path.Text; } catch (Exception) { }
+                        if (fb.ShowDialog(this) == DialogResult.OK) { path.Text = fb.SelectedPath; problem.Text = ""; }
+                    }
+                };
+                Controls.Add(browse);
+
+                problem.SetBounds(16, 152, 528, 36);
+                problem.ForeColor = Color.Firebrick;
+                Controls.Add(problem);
+
+                Button install = new Button();
+                install.SetBounds(16, 204, 120, 32);
+                install.Text = "Install";
+                install.Click += delegate
+                {
+                    string p = path.Text.Trim();
+                    if (!IsValidDir(p))
+                    {
+                        problem.Text = "Please use a new or empty folder inside " + ProgramFilesDir
+                            + " (for example " + DefaultDir + ").";
+                        return;
+                    }
+                    Chosen = Path.GetFullPath(p).TrimEnd('\\');
+                    DialogResult = DialogResult.OK;
+                };
+                Controls.Add(install);
+
+                Button without = new Button();
+                without.SetBounds(146, 204, 280, 32);
+                without.Text = "Run without setup (no admin-window support)";
+                without.Click += delegate { DialogResult = DialogResult.Ignore; };
+                Controls.Add(without);
+
+                Button cancel = new Button();
+                cancel.SetBounds(436, 204, 108, 32);
+                cancel.Text = "Cancel";
+                cancel.Click += delegate { DialogResult = DialogResult.Cancel; };
+                Controls.Add(cancel);
+
+                AcceptButton = install;
+                CancelButton = cancel;
             }
         }
 
@@ -3328,21 +3397,28 @@ Write-Output 'OK'
 
             if (IsCurrent(version) && LaunchInstalled()) return false;
 
-            DialogResult ask = MessageBox.Show(
-                "Screenshot installer.\r\n\r\nScreenshot needs a one-time setup so its hotkeys also work over games and other programs " +
-                "that run as administrator. Windows will ask for permission once; after that it starts " +
-                "normally, with no prompts.\r\n\r\nYou will pick the install folder next (the default is fine).\r\n\r\n" +
-                "Yes = install     No = run without it (hotkeys won't work over administrator windows)     Cancel = quit",
-                "Screenshot installer", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-            if (ask == DialogResult.Cancel) return false;
-            if (ask == DialogResult.No) return true;
+            for (;;)
+            {
+                DialogResult choice;
+                string chosen;
+                using (InstallerForm form = new InstallerForm(InstallDir))
+                {
+                    choice = form.ShowDialog();
+                    chosen = form.Chosen;
+                }
+                if (choice == DialogResult.Cancel) return false;
+                if (choice == DialogResult.Ignore) return true;   // run without the setup
 
-            string chosen = ChooseDir();
-            if (chosen == null) return false;   // cancelled
-            installDirOverride = chosen;
-            int result = RunElevated("--install-elevated", chosen);
-            if (result == -2) return true;   // permission refused: run without the setup
-            if (IsCurrent(version)) { try { File.Delete(SetupLog); } catch (Exception) { } if (LaunchInstalled()) return false; }
+                installDirOverride = chosen;
+                int result = RunElevated("--install-elevated", chosen);
+                if (result == -2) continue;   // Windows permission refused: back to the installer window
+                if (IsCurrent(version))
+                {
+                    try { File.Delete(SetupLog); } catch (Exception) { }
+                    if (LaunchInstalled()) return false;
+                }
+                break;
+            }
 
             string detail = "";
             try { detail = File.ReadAllText(SetupLog); } catch (Exception) { }

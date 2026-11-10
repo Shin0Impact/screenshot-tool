@@ -75,7 +75,7 @@ only starts one that is signed with a trusted certificate and installed in Progr
    a signed copy of the app to `C:\Program Files\ScreenshotTool`, and sets it to start at logon, not
    elevated.
 3. From then on, running the installer again just starts the installed copy. A newer
-   installer updates it the same way (one prompt again). You choose the install folder (default `C:\Program Files\ScreenshotTool`; it has to be inside Program Files for the administrator-window support).
+   installer updates it the same way (one prompt again). The installer window has a text box for the install folder (default `C:\Program Files\ScreenshotTool`, with Browse... to pick one); it has to be inside Program Files for the administrator-window support. Declining the Windows permission prompt brings the window back.
 4. To remove it: Settings > Apps > "Screenshot", the tray menu's "Uninstall...", or `Uninstall.exe` in the install folder. It removes the app, the startup task and the certificate.
 
 Choosing *No* at the first prompt runs the app without the setup: everything works except over
