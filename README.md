@@ -35,7 +35,7 @@ The screen freezes and a bar appears at the top, like Snipping Tool.
   nudge with the arrow keys (Shift = 10 px, Ctrl+arrows = resize), then press **Enter**, double-click, or click *Capture*.
   With it off, the region is captured as soon as you release the mouse.
 - **Save** / **Copy** (toggles): write a PNG file and/or put the shot on the clipboard. At least one stays on.
-- `Esc` or **X** closes. Right-click clears the selection, or closes if there is none.
+- `Esc` closes. Right-click clears the selection, or closes if there is none.
 
 All toggles are remembered. They are also in the tray menu, together with the **click tolerance**
 (how many pixels the mouse may move during a click and still count as a click; default 12 px).

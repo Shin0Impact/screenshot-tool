@@ -1148,8 +1148,6 @@ namespace ScreenshotTool
                 delegate { Settings.Edit = !Settings.Edit; Settings.Save(); });
             AddButton("Save", delegate { return Settings.SaveFile; }, delegate { Settings.ToggleSave(); });
             AddButton("Copy", delegate { return Settings.CopyClipboard; }, delegate { Settings.ToggleCopy(); });
-            AddSeparator();
-            AddButton("X", null, delegate { Cancel("X button"); });
 
             int pad = (int)(14 * scale);
             int btnH = (int)(36 * scale);
