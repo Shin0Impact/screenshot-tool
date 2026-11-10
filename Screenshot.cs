@@ -2305,11 +2305,40 @@ namespace ScreenshotTool
             StartHookThread();
             CleanOldLogs();
             MigrateStartup();
+            Thread wd = new Thread(Watchdog);
+            wd.IsBackground = true;
+            wd.Start();
             sync.BeginInvoke(new Action(WarmUp));
             if (hookHandle == IntPtr.Zero)
             {
                 MessageBox.Show("Could not install the PrtScn hook. Use the tray icon to capture instead.",
                     "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // If the UI thread stops answering for a while (the symptom: tray icon there, nothing opens), start a
+        // fresh copy and quit this one.
+        private void Watchdog()
+        {
+            for (;;)
+            {
+                Thread.Sleep(4000);
+                ManualResetEvent answered = new ManualResetEvent(false);
+                try { sync.BeginInvoke(new Action(delegate { answered.Set(); })); }
+                catch (Exception) { return; }
+                if (!answered.WaitOne(15000))
+                {
+                    try
+                    {
+                        ProcessStartInfo psi = new ProcessStartInfo("cmd.exe",
+                            "/c ping -n 3 127.0.0.1 >nul & start \"\" \"" + Application.ExecutablePath + "\"");
+                        psi.CreateNoWindow = true;
+                        psi.UseShellExecute = false;
+                        Process.Start(psi);
+                    }
+                    catch (Exception) { }
+                    Environment.Exit(1);
+                }
             }
         }
 
@@ -2632,14 +2661,23 @@ namespace ScreenshotTool
             {
                 // Pressing the shortcut again while the overlay is open starts a fresh capture.
                 SelectionForm o = openOverlay;
+                AnnotateForm a = openAnnotate;
                 if (o != null && !o.IsDisposed)
                 {
                     if (o.NeverShown) o.ForceClose();   // stuck: it never appeared, so free the app
                     else o.RestartFresh();
+                    return;
                 }
-                return;
+                if (a != null && !a.IsDisposed)
+                {
+                    try { a.WindowState = FormWindowState.Normal; Fg.Take(a.Handle); a.Activate(); } catch (Exception) { }
+                    return;
+                }
+                // nothing is open: only trust "busy" for a few seconds, then start over
+                if ((DateTime.UtcNow - busySince).TotalSeconds < 8) return;
             }
             busy = true;
+            busySince = DateTime.UtcNow;
             try
             {
                 Bitmap result = null;
@@ -2686,7 +2724,9 @@ namespace ScreenshotTool
                     {
                         using (AnnotateForm af = new AnnotateForm(result, toastMonitor))
                         {
-                            af.ShowDialog();
+                            openAnnotate = af;
+                            try { af.ShowDialog(); }
+                            finally { openAnnotate = null; }
                             if (af.Accepted) edited = af.Result;
                         }
                     }
@@ -2699,10 +2739,11 @@ namespace ScreenshotTool
 
                 if (result != null)
                 {
-                    using (result)
-                    {
-                        Save(result, toastMonitor);
-                    }
+                    // Writing the file / filling the clipboard can stall (antivirus, clipboard managers), so it
+                    // runs on its own thread and never freezes the app.
+                    Bitmap toSave = result;
+                    result = null;
+                    SaveAsync(toSave, toastMonitor);
                 }
             }
             catch (Exception ex)
@@ -2722,6 +2763,8 @@ namespace ScreenshotTool
         // Shows "Capturing in N..." and waits, keeping the UI responsive. The popup is gone
         // before this returns, so it never ends up in the screenshot.
         private static SelectionForm openOverlay;
+        private static AnnotateForm openAnnotate;
+        private DateTime busySince = DateTime.UtcNow;
 
         private static void Countdown(int seconds, Rectangle monitor)
         {
@@ -3008,6 +3051,19 @@ namespace ScreenshotTool
             return res;
         }
 
+        private void SaveAsync(Bitmap bmp, Rectangle toastMonitor)
+        {
+            Thread th = new Thread(delegate()
+            {
+                try { Save(bmp, toastMonitor); }
+                catch (Exception) { }
+                finally { bmp.Dispose(); }
+            });
+            th.SetApartmentState(ApartmentState.STA);   // the clipboard needs an STA thread
+            th.IsBackground = false;
+            th.Start();
+        }
+
         private void Save(Bitmap bmp, Rectangle toastMonitor)
         {
             Stopwatch sw = Stopwatch.StartNew();
@@ -3024,9 +3080,13 @@ namespace ScreenshotTool
             try
             {
                 string verb = (path != null) ? "Saved" : "Copied";
-                Toast t = new Toast(verb + "  " + bmp.Width + " x " + bmp.Height, toastMonitor, 1400);
-                t.Show();
-                t.Refresh();
+                string msg = verb + "  " + bmp.Width + " x " + bmp.Height;
+                sync.BeginInvoke(new Action(delegate
+                {
+                    Toast t = new Toast(msg, toastMonitor, 1400);
+                    t.Show();
+                    t.Refresh();
+                }));
             }
             catch (Exception) { }
 
