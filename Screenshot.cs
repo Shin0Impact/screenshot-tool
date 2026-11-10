@@ -211,6 +211,9 @@ namespace ScreenshotTool
         [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
         public static extern int DwmGetWindowAttributeInt(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
 
+        [DllImport("dwmapi.dll", EntryPoint = "DwmSetWindowAttribute")]
+        public static extern int DwmSetWindowAttributeInt(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
+
         [DllImport("dwmapi.dll")]
         public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
 
@@ -330,10 +333,91 @@ namespace ScreenshotTool
         public override Color CheckPressedBackground { get { return Hot(); } }
     }
 
-    // Tray menu look: rounded hover highlight and a plain check mark instead of a boxed one.
+    // The blurred picture of the screen behind the tray menu (taken just before it opens).
+    static class FrostBackdrop
+    {
+        public static Bitmap Small;
+        public static Point Origin;
+        public const float Factor = 16f;
+
+        public static void Capture(Rectangle monitor)
+        {
+            Release();
+            try
+            {
+                using (Bitmap full = new Bitmap(monitor.Width, monitor.Height, PixelFormat.Format32bppRgb))
+                {
+                    using (Graphics g = Graphics.FromImage(full))
+                        g.CopyFromScreen(monitor.Location, Point.Empty, monitor.Size);
+                    int w = Math.Max(2, (int)(monitor.Width / Factor)), h = Math.Max(2, (int)(monitor.Height / Factor));
+                    Bitmap small = new Bitmap(w, h, PixelFormat.Format32bppRgb);
+                    using (Graphics sg = Graphics.FromImage(small))
+                    {
+                        sg.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        sg.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        sg.DrawImage(full, new Rectangle(0, 0, w, h), 0, 0, monitor.Width, monitor.Height, GraphicsUnit.Pixel);
+                    }
+                    Small = small;
+                    Origin = monitor.Location;
+                }
+            }
+            catch (Exception) { Small = null; }
+        }
+
+        public static void Release()
+        {
+            if (Small != null) { Small.Dispose(); Small = null; }
+        }
+
+        // Windows 11: smooth rounded corners for a popup window (ignored on older Windows).
+        public static void Round(IntPtr handle)
+        {
+            try { int pref = 2; Native.DwmSetWindowAttributeInt(handle, 33, ref pref, 4); } catch (Exception) { }
+        }
+    }
+
+    // Tray menu look: frosted, matte background that shows the blurred desktop behind it, a rounded
+    // hover highlight and a plain check mark instead of a boxed one.
     class CleanRenderer : ToolStripProfessionalRenderer
     {
         public CleanRenderer() : base(new MenuColors()) { }
+
+        protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+        {
+            ToolStripDropDown dd = e.ToolStrip as ToolStripDropDown;
+            Graphics g = e.Graphics;
+            Rectangle r = new Rectangle(0, 0, e.ToolStrip.Width, e.ToolStrip.Height);
+            Bitmap small = FrostBackdrop.Small;
+            if (dd != null && small != null && dd.IsHandleCreated)
+            {
+                Point sp = dd.PointToScreen(Point.Empty);
+                float k = FrostBackdrop.Factor;
+                using (System.Drawing.Imaging.ImageAttributes ia = new System.Drawing.Imaging.ImageAttributes())
+                {
+                    ia.SetWrapMode(WrapMode.TileFlipXY);
+                    g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                    g.PixelOffsetMode = PixelOffsetMode.Half;
+                    g.DrawImage(small, r, (sp.X - FrostBackdrop.Origin.X) / k, (sp.Y - FrostBackdrop.Origin.Y) / k,
+                        r.Width / k, r.Height / k, GraphicsUnit.Pixel, ia);
+                }
+                using (SolidBrush tint = new SolidBrush(Theme.Light ? Color.FromArgb(188, 243, 243, 245) : Color.FromArgb(180, 30, 30, 34)))
+                    g.FillRectangle(tint, r);
+            }
+            else
+            {
+                using (SolidBrush b = new SolidBrush(MenuColors.Back())) g.FillRectangle(b, r);
+            }
+        }
+
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { }
+        protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }
+
+        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+        {
+            int y = e.Item.Height / 2;
+            using (Pen p = new Pen(Theme.Light ? Color.FromArgb(50, 0, 0, 0) : Color.FromArgb(60, 255, 255, 255)))
+                e.Graphics.DrawLine(p, 10, y, e.Item.Width - 10, y);
+        }
 
         protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
         {
@@ -342,7 +426,7 @@ namespace ScreenshotTool
             SmoothingMode old = e.Graphics.SmoothingMode;
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             using (GraphicsPath gp = SelectionForm.RoundedRectPath(r, 5))
-            using (SolidBrush b = new SolidBrush(MenuColors.Hot()))
+            using (SolidBrush b = new SolidBrush(Theme.Light ? Color.FromArgb(40, 0, 0, 0) : Color.FromArgb(46, 255, 255, 255)))
                 e.Graphics.FillPath(b, gp);
             e.Graphics.SmoothingMode = old;
         }
@@ -2155,6 +2239,9 @@ namespace ScreenshotTool
                 tolItem.DropDownItems.Add(item);
             }
             tolItem.DropDownDirection = ToolStripDropDownDirection.Right;
+            tolItem.DropDown.Opened += delegate { FrostBackdrop.Round(tolItem.DropDown.Handle); };
+            menu.Opened += delegate { FrostBackdrop.Round(menu.Handle); };
+            menu.Closed += delegate { FrostBackdrop.Release(); };
             menu.Items.Add(tolItem);
 
             menu.Items.Add(new ToolStripSeparator());
@@ -2336,6 +2423,7 @@ namespace ScreenshotTool
                 int x = Math.Max(wa.Left, Math.Min(pt.X, wa.Right - sz.Width));
                 int bottom = Math.Min(pt.Y, wa.Bottom);
                 int y = Math.Max(wa.Top, bottom - sz.Height);
+                FrostBackdrop.Capture(Screen.FromPoint(new Point(pt.X, pt.Y)).Bounds);   // before the menu covers it
                 Native.SetForegroundWindow(sync.Handle);   // so the menu closes when you click elsewhere
                 menu.Show(new Point(x, y));
             }
@@ -3077,7 +3165,7 @@ namespace ScreenshotTool
         {
             foreach (ToolStripItem it in items)
             {
-                it.BackColor = bg;
+                it.BackColor = Color.Transparent;
                 it.ForeColor = fg;
                 ToolStripMenuItem mi = it as ToolStripMenuItem;
                 if (mi != null && mi.HasDropDownItems)
