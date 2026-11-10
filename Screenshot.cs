@@ -2985,11 +2985,277 @@ namespace ScreenshotTool
         }
     }
 
+#if !UIA
+    // The Screenshot.exe you download is a small launcher with the real app (a UIAccess build)
+    // embedded in it. The first time it runs it sets that build up once (one Windows permission
+    // prompt): a local certificate, the signed copy in Program Files and a start-at-logon task. A
+    // UIAccess app, unlike an ordinary one, can see keys typed into elevated windows (a game started
+    // as administrator) while still running as a normal user. After that, running the launcher just
+    // starts the installed copy; a newer launcher updates it. "Screenshot.exe --uninstall" removes it.
+    static class Setup
+    {
+        private static string InstallDir
+        {
+            get
+            {
+                string pf = Environment.GetEnvironmentVariable("ProgramW6432");
+                if (string.IsNullOrEmpty(pf)) pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                return Path.Combine(pf, "ScreenshotTool");
+            }
+        }
+
+        private static string InstalledExe { get { return Path.Combine(InstallDir, "Screenshot.exe"); } }
+        private static string VersionFile { get { return Path.Combine(InstallDir, "version.txt"); } }
+        private static string SetupLog { get { return Path.Combine(Path.GetTempPath(), "screenshot-setup.log"); } }
+
+        private static byte[] ReadEmbedded()
+        {
+            using (Stream s = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("UIAccessBuild.exe"))
+            {
+                if (s == null) return null;
+                byte[] data = new byte[s.Length];
+                int got = 0;
+                while (got < data.Length)
+                {
+                    int n = s.Read(data, got, data.Length - got);
+                    if (n <= 0) break;
+                    got += n;
+                }
+                return data;
+            }
+        }
+
+        private static string VersionOf(byte[] data)
+        {
+            using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+            {
+                byte[] h = sha.ComputeHash(data);
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < 8; i++) sb.Append(h[i].ToString("x2"));
+                return sb.ToString();
+            }
+        }
+
+        private static bool IsCurrent(string version)
+        {
+            try
+            {
+                return File.Exists(InstalledExe) && File.Exists(VersionFile)
+                    && File.ReadAllText(VersionFile).Trim() == version;
+            }
+            catch (Exception) { return false; }
+        }
+
+        private static void LaunchInstalled()
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(InstalledExe);
+                psi.UseShellExecute = false;
+                psi.WorkingDirectory = InstallDir;
+                Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not start the installed copy:\r\n" + ex.Message, "Screenshot",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private static void KillOthers(int parentPid)
+        {
+            int me = Process.GetCurrentProcess().Id;
+            foreach (Process p in Process.GetProcesses())
+            {
+                try
+                {
+                    if (p.Id == me || p.Id == parentPid) continue;
+                    if (p.ProcessName.StartsWith("Screenshot", StringComparison.OrdinalIgnoreCase))
+                    {
+                        p.Kill();
+                        p.WaitForExit(3000);
+                    }
+                }
+                catch (Exception) { }
+                finally { p.Dispose(); }
+            }
+        }
+
+        private static string Q(string s) { return s.Replace("'", "''"); }
+
+        // Runs a PowerShell script (elevated, because this process is) and returns its exit code.
+        private static int RunPowerShell(string script, out string output)
+        {
+            string exe = Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe");
+            string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+            ProcessStartInfo psi = new ProcessStartInfo(exe,
+                "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encoded);
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            using (Process p = Process.Start(psi))
+            {
+                string o = p.StandardOutput.ReadToEnd();
+                string e = p.StandardError.ReadToEnd();
+                p.WaitForExit(180000);
+                output = o + e;
+                return p.HasExited ? p.ExitCode : -1;
+            }
+        }
+
+        // Runs elevated (started with "runas" by the launcher).
+        private static int Install(byte[] data, string version, int parentPid)
+        {
+            string output = "";
+            int code = 1;
+            string tmp = Path.Combine(Path.GetTempPath(), "Screenshot-UIAccess-" + version + ".exe");
+            try
+            {
+                KillOthers(parentPid);
+                File.WriteAllBytes(tmp, data);
+                string user = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+                string script = @"
+$ErrorActionPreference = 'Stop'
+try {
+  $src = '__SRC__'; $dir = '__DIR__'; $ver = '__VER__'; $user = '__USER__'
+  $subject = 'CN=Screenshot Tool (local)'
+  $target = Join-Path $dir 'Screenshot.exe'
+  $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Subject -eq $subject -and $_.NotAfter -gt (Get-Date).AddDays(30) } | Select-Object -First 1
+  if (-not $cert) { $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddYears(10) -KeyExportPolicy NonExportable }
+  $cer = Join-Path $env:TEMP 'screenshot-tool-local.cer'
+  Export-Certificate -Cert $cert -FilePath $cer | Out-Null
+  Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+  Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+  Remove-Item $cer -Force
+  New-Item -ItemType Directory -Force $dir | Out-Null
+  Copy-Item $src $target -Force
+  $sig = Set-AuthenticodeSignature -FilePath $target -Certificate $cert -HashAlgorithm SHA256
+  if ($sig.Status -ne 'Valid') { throw ('Signing failed: ' + $sig.Status + ' ' + $sig.StatusMessage) }
+  Set-Content -Path (Join-Path $dir 'version.txt') -Value $ver -Encoding Ascii
+  Unregister-ScheduledTask -TaskName 'ScreenshotTool' -Confirm:$false -ErrorAction SilentlyContinue
+  Register-ScheduledTask -TaskName 'ScreenshotTool' -Action (New-ScheduledTaskAction -Execute $target) -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $user) -Principal (New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited) -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)) | Out-Null
+  Write-Output 'OK'
+} catch {
+  Write-Output ('FAILED: ' + $_.Exception.Message)
+  exit 1
+}
+".Replace("__SRC__", Q(tmp)).Replace("__DIR__", Q(InstallDir)).Replace("__VER__", Q(version)).Replace("__USER__", Q(user));
+                code = RunPowerShell(script, out output);
+            }
+            catch (Exception ex)
+            {
+                output += "\r\nFAILED: " + ex.Message;
+                code = 1;
+            }
+            finally
+            {
+                try { File.Delete(tmp); } catch (Exception) { }
+            }
+            try { File.WriteAllText(SetupLog, output); } catch (Exception) { }
+            return code;
+        }
+
+        private static int Uninstall(int parentPid)
+        {
+            string output = "";
+            try
+            {
+                KillOthers(parentPid);
+                string script = @"
+$ErrorActionPreference = 'Continue'
+$subject = 'CN=Screenshot Tool (local)'
+Unregister-ScheduledTask -TaskName 'ScreenshotTool' -Confirm:$false -ErrorAction SilentlyContinue
+if (Test-Path '__DIR__') { Remove-Item '__DIR__' -Recurse -Force }
+foreach ($store in 'Cert:\LocalMachine\My', 'Cert:\LocalMachine\Root', 'Cert:\LocalMachine\TrustedPublisher') {
+  Get-ChildItem $store | Where-Object { $_.Subject -eq $subject } | Remove-Item -Force
+}
+Write-Output 'OK'
+".Replace("__DIR__", Q(InstallDir));
+                int code = RunPowerShell(script, out output);
+                try { File.WriteAllText(SetupLog, output); } catch (Exception) { }
+                return code;
+            }
+            catch (Exception ex)
+            {
+                try { File.WriteAllText(SetupLog, ex.ToString()); } catch (Exception) { }
+                return 1;
+            }
+        }
+
+        // Starts this same exe elevated with the given argument and waits. Returns -2 if the user said no.
+        private static int RunElevated(string argument)
+        {
+            ProcessStartInfo psi = new ProcessStartInfo(Application.ExecutablePath,
+                argument + " " + Process.GetCurrentProcess().Id);
+            psi.Verb = "runas";
+            psi.UseShellExecute = true;
+            try
+            {
+                using (Process p = Process.Start(psi))
+                {
+                    p.WaitForExit();
+                    return p.ExitCode;
+                }
+            }
+            catch (System.ComponentModel.Win32Exception) { return -2; }
+        }
+
+        // Returns true when the app should simply start in this process (no embedded build, or the
+        // user chose to skip the setup).
+        public static bool Handle(string[] args)
+        {
+            byte[] data = ReadEmbedded();
+            if (data == null) return true;   // built without the embedded app (build.bat): run directly
+            string version = VersionOf(data);
+            string cmd = args.Length > 0 ? args[0] : "";
+            int parent = 0;
+            if (args.Length > 1) int.TryParse(args[1], out parent);
+
+            if (cmd == "--install-elevated") { Environment.ExitCode = Install(data, version, parent); return false; }
+            if (cmd == "--uninstall-elevated") { Environment.ExitCode = Uninstall(parent); return false; }
+
+            Application.EnableVisualStyles();
+            if (cmd == "--uninstall")
+            {
+                int rc = RunElevated("--uninstall-elevated");
+                MessageBox.Show(rc == 0 ? "Screenshot was removed." : "Could not remove it (see " + SetupLog + ").",
+                    "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
+
+            if (IsCurrent(version)) { LaunchInstalled(); return false; }
+
+            DialogResult ask = MessageBox.Show(
+                "Screenshot needs a one-time setup so its hotkeys also work over games and other programs " +
+                "that run as administrator. Windows will ask for permission once; after that it starts " +
+                "normally, with no prompts.\r\n\r\nSet it up now?\r\n\r\n" +
+                "Yes = set up     No = run without it (hotkeys won't work over administrator windows)     Cancel = quit",
+                "Screenshot - first run", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (ask == DialogResult.Cancel) return false;
+            if (ask == DialogResult.No) return true;
+
+            int result = RunElevated("--install-elevated");
+            if (result == -2) return true;   // permission refused: run without the setup
+            if (IsCurrent(version)) { LaunchInstalled(); return false; }
+
+            string detail = "";
+            try { detail = File.ReadAllText(SetupLog); } catch (Exception) { }
+            MessageBox.Show("The setup did not finish, so Screenshot will run without it this time.\r\n\r\n" + detail,
+                "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return true;
+        }
+    }
+#endif
+
     static class Program
     {
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
+#if !UIA
+            if (!Setup.Handle(args)) return;
+#endif
             bool created;
             using (Mutex mutex = new Mutex(true, "Local\\ScreenshotTool_SingleInstance", out created))
             {

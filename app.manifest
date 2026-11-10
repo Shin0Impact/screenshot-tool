@@ -6,12 +6,12 @@
       <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
     </application>
   </compatibility>
-  <!-- Run as administrator: a keyboard hook cannot see keys typed into an elevated window
-       (e.g. a game started as admin), so without this the hotkeys do nothing there. -->
+  <!-- Normal (not elevated) launcher. The UIAccess build that gets installed is compiled from the
+       same source with app.uiaccess.manifest and embedded in this exe. -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <requestedExecutionLevel level="highestAvailable" uiAccess="false" />
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

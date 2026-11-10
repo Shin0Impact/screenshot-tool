@@ -62,19 +62,25 @@ screen's real pixels on each monitor. Nothing is resized, except when you ask fo
 
 `screenshot-tool.log` next to the exe records start-up and capture timings, useful for debugging.
 
-## Administrator rights
+## Hotkeys over games that run as administrator
 
-The app runs elevated (it asks for permission when it starts). Windows does not let a normal
-program's keyboard hook see keys typed into an elevated window, such as a game that was started
-as administrator, so without this the hotkeys silently do nothing there and Windows' own
-Snipping Tool opens instead. "Start with Windows" creates a scheduled task that runs with the
-highest privileges, so it starts at login without a prompt.
+Windows does not let a normal program see keys typed into an elevated window (a game started as
+administrator, Task Manager, ...), so ordinary hotkeys do nothing there and Windows' own Snipping
+Tool opens instead. A "UIAccess" program is allowed to, without being elevated itself, but Windows
+only starts one that is signed with a trusted certificate and installed in Program Files.
 
-### Without administrator rights (UIAccess build)
+`Screenshot.exe` takes care of that by itself:
 
-`Screenshot-UIAccess.exe` gives the same reach over elevated windows while running as a normal
-user. Windows only starts a UIAccess exe if it is signed with a certificate the machine trusts and
-installed in Program Files, so run `Install-UIAccess.ps1` once (it asks for administrator rights
-once): it creates a local self-signed certificate, signs and installs the exe to
-`C:\Program Files\ScreenshotTool` and sets it to start at logon, not elevated. The log then lives in
-`%LOCALAPPDATA%\ScreenshotTool`. `Install-UIAccess.ps1 -Uninstall` removes everything again.
+1. Double-click it. The first time it asks to do a one-time setup and Windows shows **one**
+   permission prompt.
+2. It creates a local self-signed certificate (trusted on this PC, only used for this exe), installs
+   a signed copy of the app to `C:\Program Files\ScreenshotTool`, and sets it to start at logon, not
+   elevated.
+3. From then on, double-clicking `Screenshot.exe` just starts the installed copy. A newer
+   `Screenshot.exe` updates it the same way (one prompt again).
+4. `Screenshot.exe --uninstall` removes the app, the startup task and the certificate.
+
+Choosing *No* at the first prompt runs the app without the setup: everything works except over
+administrator windows. The installed app's log is in `%LOCALAPPDATA%\ScreenshotTool` (the Program
+Files folder is read-only); the setup's own output is in `%TEMP%\screenshot-setup.log`.
+`build.bat` makes a plain build with no setup step, for development.
