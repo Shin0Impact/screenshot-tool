@@ -78,7 +78,7 @@ only starts one that is signed with a trusted certificate and installed in Progr
   programs that run as administrator.
 
 The install folder is a text box with a Browse... button. Running the installer again offers to add
-administrator support (for a standard install), update, start or uninstall. To remove it you can also use
+administrator support (for a standard install), remove it (for an administrator install), update, start or uninstall. To remove it you can also use
 Settings > Apps > "Screenshot", the tray menu's "Uninstall...", or `Uninstall.exe` in the install folder.
 It removes the app, the startup entry and (for the administrator install) the certificate. The app writes
 no logs.

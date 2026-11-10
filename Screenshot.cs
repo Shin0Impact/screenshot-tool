@@ -3370,7 +3370,7 @@ Write-Output 'OK'
                 TopMost = true;
 
                 Label head = new Label();
-                head.SetBounds(16, 14, 548, 80);
+                head.SetBounds(16, 14, 648, 80);
                 Controls.Add(head);
 
                 if (adminDir == null && userDir == null)
@@ -3436,7 +3436,7 @@ Write-Output 'OK'
                     return;
                 }
 
-                ClientSize = new Size(580, 190);
+                ClientSize = new Size(680, 190);
                 bool admin = adminDir != null;
                 bool current = admin ? adminCurrent : userCurrent;
                 head.Text = admin
@@ -3449,9 +3449,10 @@ Write-Output 'OK'
                 if (!admin) { AddButton("Add administrator support", "addadmin", x, 120, 200); x += 208; }
                 if (!current) { AddButton("Update", "update", x, 120, 96); x += 104; }
                 else { AddButton("Start Screenshot", "start", x, 120, 140); x += 148; }
+                if (admin) { AddButton("Remove administrator support", "removeadmin", x, 120, 210); x += 218; }
                 AddButton("Uninstall", "uninstall", x, 120, 100);
                 Button close = new Button();
-                close.SetBounds(464, 120, 100, 32);
+                close.SetBounds(564, 120, 100, 32);
                 close.Text = "Close";
                 close.Click += delegate { Action = "close"; DialogResult = DialogResult.Cancel; };
                 Controls.Add(close);
@@ -3610,6 +3611,31 @@ Write-Output 'OK'
                         MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) continue;
                     DoUninstall();
                     return false;
+                }
+
+                if (action == "removeadmin")
+                {
+                    if (MessageBox.Show("Remove administrator support? Screenshot will keep working, installed for you "
+                        + "only, but its hotkeys will stop working over programs that run as administrator.",
+                        "Screenshot", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) continue;
+                    int rr = RunElevated("--uninstall-elevated", null, "Removing administrator support...");
+                    if (rr == -2) continue;
+                    try { File.Delete(SetupLog); } catch (Exception) { }
+                    if (rr != 0 || HasApp(AdminDir()))
+                    {
+                        MessageBox.Show("Could not remove administrator support.", "Screenshot",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        continue;
+                    }
+                    string err = InstallUser(userData, userVer, UserDefaultDir, null);
+                    if (err != null)
+                    {
+                        MessageBox.Show("Administrator support was removed, but the standard install did not finish.\r\n\r\n" + err,
+                            "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        continue;
+                    }
+                    if (StartApp(UserDefaultDir)) return false;
+                    continue;
                 }
 
                 bool admin = action == "install-admin" || action == "addadmin" || (action == "update" && adminDir != null);
