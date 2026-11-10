@@ -2841,9 +2841,14 @@ namespace ScreenshotTool
                     + ", annotate=" + (a != null && !a.IsDisposed) + ", busy for " + (int)(DateTime.UtcNow - busySince).TotalSeconds + " s");
                 if (o != null && !o.IsDisposed)
                 {
-                    if (o.NeverShown) { Diag.Log("overlay never showed: forcing it closed"); o.ForceClose(); }
-                    else if (o.Visible) o.RestartFresh();
-                    else { pendingPresses++; Diag.Log("queued press (overlay not on screen yet): " + pendingPresses); }
+                    if (o.NeverShown || !o.Visible)
+                    {
+                        // An overlay that exists but is not on screen would swallow every press: close it and start over.
+                        Diag.Log("overlay is not on screen: closing it and starting over");
+                        o.ForceClose();
+                        Post(mode);
+                    }
+                    else o.RestartFresh();
                     return;
                 }
                 if (a != null && !a.IsDisposed)
