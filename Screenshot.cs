@@ -308,6 +308,45 @@ namespace ScreenshotTool
         }
     }
 
+    // Temporary diagnostics: %LOCALAPPDATA%\ScreenshotTool\screenshot-tool.log (kept small, never throws).
+    static class Diag
+    {
+        private static readonly object gate = new object();
+        private static string path;
+
+        public static string Path_
+        {
+            get
+            {
+                if (path == null)
+                {
+                    string d = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenshotTool");
+                    Directory.CreateDirectory(d);
+                    path = System.IO.Path.Combine(d, "screenshot-tool.log");
+                }
+                return path;
+            }
+        }
+
+        public static void Log(string text)
+        {
+            try
+            {
+                lock (gate)
+                {
+                    string p = Path_;
+                    FileInfo fi = new FileInfo(p);
+                    if (fi.Exists && fi.Length > 1000000)
+                    {
+                        try { File.Delete(p + ".old"); File.Move(p, p + ".old"); } catch (Exception) { }
+                    }
+                    File.AppendAllText(p, DateTime.Now.ToString("HH:mm:ss.fff") + " [" + Thread.CurrentThread.ManagedThreadId + "] " + text + "\r\n");
+                }
+            }
+            catch (Exception) { }
+        }
+    }
+
     class MenuColors : ProfessionalColorTable
     {
         public static Color Back() { return Theme.Light ? Color.FromArgb(249, 249, 249) : Color.FromArgb(43, 43, 43); }
@@ -1349,7 +1388,7 @@ namespace ScreenshotTool
         {
             // Pressed again before the window is on screen (the shortcut was spammed): remember it and
             // restart as soon as the window is up, instead of closing a window that does not exist yet.
-            if (!IsHandleCreated || !Visible) { restartPending = true; return; }
+            if (!IsHandleCreated || !Visible) { restartPending = true; Diag.Log("restart asked before overlay was visible: queued"); return; }
             CloseReason = "shortcut again";
             Outcome = OverlayOutcome.DelayRestart;
             DelaySeconds = 0;
@@ -2297,6 +2336,7 @@ namespace ScreenshotTool
             tray.Visible = true;
             tray.MouseClick += delegate(object s, MouseEventArgs e)
             {
+                Diag.Log("tray click: " + e.Button + ", busy=" + busy);
                 if (e.Button == MouseButtons.Left) PostDelayed(CaptureMode.Overlay);
                 else if (e.Button == MouseButtons.Right) ShowTrayMenu(menu);
             };
@@ -2324,10 +2364,14 @@ namespace ScreenshotTool
             {
                 Thread.Sleep(4000);
                 ManualResetEvent answered = new ManualResetEvent(false);
+                Stopwatch lat = Stopwatch.StartNew();
                 try { sync.BeginInvoke(new Action(delegate { answered.Set(); })); }
                 catch (Exception) { return; }
-                if (!answered.WaitOne(15000))
+                bool ok = answered.WaitOne(15000);
+                if (ok && lat.ElapsedMilliseconds > 700) Diag.Log("UI thread was slow: " + lat.ElapsedMilliseconds + " ms to answer");
+                if (!ok)
                 {
+                    Diag.Log("UI thread did not answer for 15 s: restarting the app");
                     try
                     {
                         ProcessStartInfo psi = new ProcessStartInfo("cmd.exe",
@@ -2509,6 +2553,8 @@ namespace ScreenshotTool
                         Native.GetModuleHandle(m.ModuleName), 0);
                 }
                 ready.Set();
+                Diag.Log("keyboard hook installed: " + (hookHandle != IntPtr.Zero) + ", elevated=" + IsElevated((uint)Process.GetCurrentProcess().Id)
+                    + ", uiAccess=" + HasUiAccess((uint)Process.GetCurrentProcess().Id));
                 if (hookHandle == IntPtr.Zero) return;
                 Native.MSG msg;
                 while (Native.GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
@@ -2516,6 +2562,7 @@ namespace ScreenshotTool
                     Native.TranslateMessage(ref msg);
                     Native.DispatchMessage(ref msg);
                 }
+                Diag.Log("keyboard hook thread ended");
                 Native.UnhookWindowsHookEx(hookHandle);
                 hookHandle = IntPtr.Zero;
             });
@@ -2621,22 +2668,29 @@ namespace ScreenshotTool
         {
             try { File.Delete(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshot-tool.log")); } catch (Exception) { }
             try { File.Delete(Path.Combine(Path.GetTempPath(), "screenshot-setup.log")); } catch (Exception) { }
-            try
-            {
-                string d = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenshotTool");
-                if (Directory.Exists(d))
-                {
-                    try { File.Delete(Path.Combine(d, "screenshot-tool.log")); } catch (Exception) { }
-                    try { Directory.Delete(d); } catch (Exception) { }
-                }
-            }
-            catch (Exception) { }
         }
 
         private void Post(CaptureMode mode)
         {
             // Never do real work inside the hook; hand it to the UI thread.
-            sync.BeginInvoke(new Action<CaptureMode>(Capture), new object[] { mode });
+            DateTime queued = DateTime.UtcNow;
+            sync.BeginInvoke(new Action(delegate
+            {
+                Diag.Log("hotkey " + mode + ", UI thread picked it up after " + (int)(DateTime.UtcNow - queued).TotalMilliseconds + " ms; foreground: " + ForegroundInfo());
+                Capture(mode);
+            }));
+        }
+
+        private static string ForegroundInfo()
+        {
+            try
+            {
+                uint pid;
+                Native.GetWindowThreadProcessId(Native.GetForegroundWindow(), out pid);
+                using (Process p = Process.GetProcessById((int)pid))
+                    return p.ProcessName + " (elevated=" + IsElevated(pid) + ")";
+            }
+            catch (Exception) { return "?"; }
         }
 
         // For tray-menu / tray-click captures: wait a moment so the menu is gone before the shot.
@@ -2662,9 +2716,11 @@ namespace ScreenshotTool
                 // Pressing the shortcut again while the overlay is open starts a fresh capture.
                 SelectionForm o = openOverlay;
                 AnnotateForm a = openAnnotate;
+                Diag.Log("busy: overlay=" + (o != null && !o.IsDisposed) + (o != null && !o.IsDisposed ? " visible=" + o.Visible : "")
+                    + ", annotate=" + (a != null && !a.IsDisposed) + ", busy for " + (int)(DateTime.UtcNow - busySince).TotalSeconds + " s");
                 if (o != null && !o.IsDisposed)
                 {
-                    if (o.NeverShown) o.ForceClose();   // stuck: it never appeared, so free the app
+                    if (o.NeverShown) { Diag.Log("overlay never showed: forcing it closed"); o.ForceClose(); }
                     else o.RestartFresh();
                     return;
                 }
@@ -2675,9 +2731,11 @@ namespace ScreenshotTool
                 }
                 // nothing is open: only trust "busy" for a few seconds, then start over
                 if ((DateTime.UtcNow - busySince).TotalSeconds < 8) return;
+                Diag.Log("busy flag was stale: starting over");
             }
             busy = true;
             busySince = DateTime.UtcNow;
+            Diag.Log("capture start, mode " + mode);
             try
             {
                 Bitmap result = null;
@@ -2725,8 +2783,9 @@ namespace ScreenshotTool
                         using (AnnotateForm af = new AnnotateForm(result, toastMonitor))
                         {
                             openAnnotate = af;
+                            Diag.Log("annotate window opening");
                             try { af.ShowDialog(); }
-                            finally { openAnnotate = null; }
+                            finally { openAnnotate = null; Diag.Log("annotate window closed, accepted=" + af.Accepted); }
                             if (af.Accepted) edited = af.Result;
                         }
                     }
@@ -2748,6 +2807,7 @@ namespace ScreenshotTool
             }
             catch (Exception ex)
             {
+                Diag.Log("capture error: " + ex);
                 try
                 {
                     tray.ShowBalloonTip(3000, "Screenshot failed", ex.Message, ToolTipIcon.Error);
@@ -2757,6 +2817,7 @@ namespace ScreenshotTool
             finally
             {
                 busy = false;
+                Diag.Log("capture end (" + (int)(DateTime.UtcNow - busySince).TotalMilliseconds + " ms)");
             }
         }
 
@@ -3019,12 +3080,16 @@ namespace ScreenshotTool
             catch (Exception) { }
 
             OverlayResult res = new OverlayResult();
+            Stopwatch ov = Stopwatch.StartNew();
             using (Bitmap desktop = Grab(vs, PixelFormat.Format32bppRgb))
             using (SelectionForm form = new SelectionForm(desktop, vs, windows, MonitorRects(), mon, startMode))
             {
+                Diag.Log("overlay prepared in " + ov.ElapsedMilliseconds + " ms (" + windows.Count + " windows), showing");
                 openOverlay = form;
                 try { form.ShowDialog(); }
                 finally { openOverlay = null; }
+                Diag.Log("overlay closed after " + ov.ElapsedMilliseconds + " ms: " + form.Outcome
+                    + (form.CloseReason.Length > 0 ? " (" + form.CloseReason + ")" : ""));
 
                 if (form.Outcome == OverlayOutcome.Rect)
                 {
@@ -3055,8 +3120,9 @@ namespace ScreenshotTool
         {
             Thread th = new Thread(delegate()
             {
-                try { Save(bmp, toastMonitor); }
-                catch (Exception) { }
+                Stopwatch sv = Stopwatch.StartNew();
+                try { Save(bmp, toastMonitor); Diag.Log("saved/copied in " + sv.ElapsedMilliseconds + " ms"); }
+                catch (Exception ex) { Diag.Log("save error: " + ex.Message); }
                 finally { bmp.Dispose(); }
             });
             th.SetApartmentState(ApartmentState.STA);   // the clipboard needs an STA thread
@@ -4105,11 +4171,16 @@ Write-Output 'OK'
             bool created;
             using (Mutex mutex = new Mutex(true, "Local\\ScreenshotTool_SingleInstance", out created))
             {
-                if (!created) return;
+                if (!created) { Diag.Log("second instance exited (already running)"); return; }
+                Diag.Log("---- start, build " + (Environment.GetCommandLineArgs().Length) + " args, exe " + Application.ExecutablePath);
+                AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+                {
+                    Diag.Log("UNHANDLED (terminating=" + e.IsTerminating + "): " + e.ExceptionObject);
+                };
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
                 Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)
                 {
-                    // swallowed: a stray UI exception must not kill the tray app
+                    Diag.Log("UI exception swallowed: " + e.Exception);   // must not kill the tray app
                 };
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
