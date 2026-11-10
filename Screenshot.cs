@@ -342,7 +342,7 @@ namespace ScreenshotTool
                 {
                     string p = Path_;
                     FileInfo fi = new FileInfo(p);
-                    if (fi.Exists && fi.Length > 1000000)
+                    if (fi.Exists && fi.Length > 6000000)
                     {
                         try { File.Delete(p + ".old"); File.Move(p, p + ".old"); } catch (Exception) { }
                     }
@@ -2711,8 +2711,10 @@ namespace ScreenshotTool
                     bool shift = keys[0xA0] || keys[0xA1] || keys[Native.VK_SHIFT];
                     bool ctrl = keys[0xA2] || keys[0xA3] || keys[Native.VK_CONTROL];
                     bool alt = keys[0xA4] || keys[0xA5] || keys[Native.VK_MENU];
-                    if (vk == 0x53 || vk == 0x1B || vk == 0x2C || vk == 0x5B || vk == 0x5C || vk == 0x10 || vk == 0xA0 || vk == 0xA1
-                        || vk == 0x11 || vk == 0xA2 || vk == 0xA3 || vk == 0x12 || vk == 0xA4 || vk == 0xA5)
+                    // Only shortcut keys are logged: Win+Shift+S, PrtScn, and Esc / Enter while an overlay is open.
+                    // Ordinary typing is never written to the log.
+                    if ((vk == 0x53 && win && shift) || vk == 0x2C
+                        || ((vk == 0x1B || vk == 0x0D) && openOverlay != null))
                     {
                         string line = "key " + vk.ToString("X2") + (down ? " down" : " up") + (((int)k.flags & 0x10) != 0 ? " injected" : "")
                             + " [win=" + win + " shift=" + shift + " ctrl=" + ctrl + " alt=" + alt + " swallowS=" + swallowSKeyUp + "]";
