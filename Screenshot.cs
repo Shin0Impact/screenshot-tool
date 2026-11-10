@@ -1306,6 +1306,7 @@ namespace ScreenshotTool
         private readonly Control sync;
         private readonly Native.LowLevelKeyboardProc hookProc;
         private IntPtr hookHandle = IntPtr.Zero;
+        private readonly System.Windows.Forms.Timer hookTimer = new System.Windows.Forms.Timer();
         private bool busy;
         private bool swallowKeyUp;
         private bool swallowSKeyUp;
@@ -1391,13 +1392,16 @@ namespace ScreenshotTool
             };
 
             hookProc = HookCallback;
-            using (Process p = Process.GetCurrentProcess())
-            using (ProcessModule m = p.MainModule)
-            {
-                hookHandle = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, hookProc,
-                    Native.GetModuleHandle(m.ModuleName), 0);
-            }
-            Log("started; hook handle = " + hookHandle + ", error = " + Marshal.GetLastWin32Error());
+            InstallHook();
+            Log("started; hook handle = " + hookHandle);
+            // Windows silently drops a low-level hook if it ever stalls (sleep, lock, display change,
+            // a slow callback). Re-install it regularly so the hotkeys never fall back to Windows.
+            hookTimer.Interval = 15000;
+            hookTimer.Tick += delegate { InstallHook(); };
+            hookTimer.Start();
+            SystemEvents.DisplaySettingsChanged += delegate { InstallHook(); Log("display change: hook re-installed"); };
+            SystemEvents.SessionSwitch += delegate { InstallHook(); Log("session switch: hook re-installed"); };
+            SystemEvents.PowerModeChanged += delegate { InstallHook(); Log("power change: hook re-installed"); };
             sync.BeginInvoke(new Action(WarmUp));
             if (hookHandle == IntPtr.Zero)
             {
@@ -1407,6 +1411,26 @@ namespace ScreenshotTool
         }
 
         // ---- keyboard hook -------------------------------------------------------------
+
+        // Installs a fresh hook, then removes the previous one, so there is never a gap.
+        private void InstallHook()
+        {
+            IntPtr fresh;
+            using (Process p = Process.GetCurrentProcess())
+            using (ProcessModule m = p.MainModule)
+            {
+                fresh = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, hookProc,
+                    Native.GetModuleHandle(m.ModuleName), 0);
+            }
+            if (fresh == IntPtr.Zero)
+            {
+                Log("hook install failed, error = " + Marshal.GetLastWin32Error());
+                return;
+            }
+            IntPtr old = hookHandle;
+            hookHandle = fresh;
+            if (old != IntPtr.Zero) Native.UnhookWindowsHookEx(old);
+        }
 
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
