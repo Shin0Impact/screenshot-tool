@@ -2954,12 +2954,36 @@ namespace ScreenshotTool
             try
             {
                 return File.Exists(InstalledExe) && File.Exists(VersionFile)
-                    && File.ReadAllText(VersionFile).Trim() == version;
+                    && File.ReadAllText(VersionFile).Trim() == version
+                    && CertTrusted();
             }
             catch (Exception) { return false; }
         }
 
-        private static void LaunchInstalled()
+        // The installed copy only starts while its signing certificate is trusted on this computer.
+        private static bool CertTrusted()
+        {
+            try
+            {
+                foreach (System.Security.Cryptography.X509Certificates.StoreName name in new System.Security.Cryptography.X509Certificates.StoreName[] {
+                    System.Security.Cryptography.X509Certificates.StoreName.Root,
+                    System.Security.Cryptography.X509Certificates.StoreName.TrustedPublisher })
+                {
+                    System.Security.Cryptography.X509Certificates.X509Store st = new System.Security.Cryptography.X509Certificates.X509Store(
+                        name, System.Security.Cryptography.X509Certificates.StoreLocation.LocalMachine);
+                    st.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadOnly);
+                    bool found = false;
+                    foreach (System.Security.Cryptography.X509Certificates.X509Certificate2 c in st.Certificates)
+                        if (c.Subject == "CN=Screenshot Tool (local)") found = true;
+                    st.Close();
+                    if (!found) return false;
+                }
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        private static bool LaunchInstalled()
         {
             try
             {
@@ -2969,12 +2993,9 @@ namespace ScreenshotTool
                 psi.UseShellExecute = true;
                 psi.WorkingDirectory = InstallDir;
                 Process.Start(psi);
+                return true;
             }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Could not start the installed copy:\r\n" + ex.Message, "Screenshot",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+            catch (Exception) { return false; }
         }
 
         private static void KillOthers(int parentPid)
@@ -3184,7 +3205,7 @@ Write-Output 'OK'
                 return false;
             }
 
-            if (IsCurrent(version)) { LaunchInstalled(); return false; }
+            if (IsCurrent(version) && LaunchInstalled()) return false;
 
             DialogResult ask = MessageBox.Show(
                 "Screenshot needs a one-time setup so its hotkeys also work over games and other programs " +
@@ -3197,7 +3218,7 @@ Write-Output 'OK'
 
             int result = RunElevated("--install-elevated");
             if (result == -2) return true;   // permission refused: run without the setup
-            if (IsCurrent(version)) { try { File.Delete(SetupLog); } catch (Exception) { } LaunchInstalled(); return false; }
+            if (IsCurrent(version)) { try { File.Delete(SetupLog); } catch (Exception) { } if (LaunchInstalled()) return false; }
 
             string detail = "";
             try { detail = File.ReadAllText(SetupLog); } catch (Exception) { }
