@@ -984,6 +984,7 @@ namespace ScreenshotTool
         private int mode;            // 0 = region, 1 = pick a window, 2 = pick a monitor
         private bool windowMode { get { return mode != 0; } }   // hover-pick modes
         private readonly List<Rectangle> monitors;  // screen coordinates
+        private Point startCursor;   // mouse position (screen) when the overlay opened
         private bool clickedAway;    // this press only deselected an existing selection
         private bool dragging;       // drawing a new selection
         private bool exceeded;       // pointer left the click-tolerance zone during this drag
@@ -1006,6 +1007,9 @@ namespace ScreenshotTool
         {
             Theme.Refresh();
             monitors = monitorRects;
+            Native.POINT sc;
+            Native.GetCursorPos(out sc);
+            startCursor = new Point(sc.X, sc.Y);
             shot = desktopShot;
             bounds = screenBounds;
             windows = windowRects;
@@ -1109,7 +1113,8 @@ namespace ScreenshotTool
         private void BuildToolbar()
         {
             AddButton("Region", delegate { return mode == 0; }, delegate { SetMode(0); });
-            AddButton("Window", delegate { return mode == 1; }, delegate { SetMode(1); });
+            AddButton("Window", delegate { return mode == 1 && !Settings.MonitorFollow; },
+                delegate { if (Settings.MonitorFollow) FinishFollowWindow(); else SetMode(1); });
             AddButton("Monitor", delegate { return mode == 2 && !Settings.MonitorFollow; },
                 delegate { if (Settings.MonitorFollow) FinishRect(monitorClient); else SetMode(2); });
             AddButton("All monitors", null, delegate { Outcome = OverlayOutcome.AllMonitors; Close(); });
@@ -1123,7 +1128,7 @@ namespace ScreenshotTool
                 {
                     Settings.MonitorFollow = !Settings.MonitorFollow;
                     Settings.Save();
-                    if (mode == 2 && Settings.MonitorFollow) SetMode(0);
+                    if (mode != 0 && Settings.MonitorFollow) SetMode(0);
                     Invalidate();
                 });
             AddSeparator();
@@ -1208,6 +1213,22 @@ namespace ScreenshotTool
             DelaySeconds = 0;
             RestartMode = mode;
             Close();
+        }
+
+        // Follow mouse: the window that was under the mouse when the shortcut was pressed.
+        private void FinishFollowWindow()
+        {
+            if (windows == null) return;
+            foreach (Rectangle w in windows)
+            {
+                if (w.Contains(startCursor))
+                {
+                    Rectangle r = w;
+                    r.Offset(-bounds.X, -bounds.Y);
+                    FinishRect(r);
+                    return;
+                }
+            }
         }
 
         private void Cancel(string why)
@@ -2007,7 +2028,7 @@ namespace ScreenshotTool
 
             ToolStripMenuItem adjustItem = new ToolStripMenuItem("Edit: adjust the selection, then annotate");
             adjustItem.Click += delegate { Settings.Edit = !Settings.Edit; Settings.Save(); };
-            ToolStripMenuItem followItem = new ToolStripMenuItem("Monitor capture follows the mouse (no picking)");
+            ToolStripMenuItem followItem = new ToolStripMenuItem("Monitor and window capture follow the mouse (no picking)");
             followItem.Click += delegate { Settings.MonitorFollow = !Settings.MonitorFollow; Settings.Save(); };
             ToolStripMenuItem saveItem = new ToolStripMenuItem("Save to file");
             saveItem.Click += delegate { Settings.ToggleSave(); };
@@ -2313,9 +2334,14 @@ namespace ScreenshotTool
                 Bitmap result = null;
                 Rectangle toastMonitor = CurrentMonitor();
 
-                if (mode == CaptureMode.Monitor && Settings.MonitorFollow)
+                // "Follow mouse": monitor / window capture takes whatever is under the mouse, no picking.
+                Rectangle direct = Rectangle.Empty;
+                if (Settings.MonitorFollow && mode == CaptureMode.Monitor) direct = toastMonitor;
+                else if (Settings.MonitorFollow && mode == CaptureMode.Window) direct = WindowUnderCursor();
+
+                if (!direct.IsEmpty)
                 {
-                    result = Grab(toastMonitor, PixelFormat.Format24bppRgb);
+                    result = Grab(direct, PixelFormat.Format24bppRgb);
                 }
                 else if (mode == CaptureMode.AllMonitors)
                 {
@@ -2326,6 +2352,7 @@ namespace ScreenshotTool
                     int startMode = (mode == CaptureMode.Window) ? 1
                         : (mode == CaptureMode.Monitor) ? 2
                         : (mode == CaptureMode.Overlay ? Settings.LastMode : 0);
+                    if (Settings.MonitorFollow && mode == CaptureMode.Overlay) startMode = 0;
                     for (;;)
                     {
                         OverlayResult o = RunOverlay(startMode);
@@ -2437,6 +2464,22 @@ namespace ScreenshotTool
                 Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN),
                 Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN),
                 Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN));
+        }
+
+        private static Rectangle WindowUnderCursor()
+        {
+            Native.POINT pt;
+            Native.GetCursorPos(out pt);
+            Rectangle vs = VirtualScreen();
+            foreach (Rectangle w in CollectWindows())
+            {
+                if (w.Contains(pt.X, pt.Y))
+                {
+                    Rectangle r = Rectangle.Intersect(w, vs);
+                    if (r.Width > 0 && r.Height > 0) return r;
+                }
+            }
+            return Rectangle.Empty;
         }
 
         private static Rectangle CurrentMonitor()
