@@ -397,6 +397,8 @@ namespace ScreenshotTool
         private bool busy;
         private bool swallowKeyUp;
         private bool swallowSKeyUp;
+        private bool snapshotPassed;
+        private readonly bool[] keys = new bool[256];
         private readonly string saveDir;
         private readonly ToolStripMenuItem startupItem;
 
@@ -439,6 +441,7 @@ namespace ScreenshotTool
                 hookHandle = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, hookProc,
                     Native.GetModuleHandle(m.ModuleName), 0);
             }
+            Log("started; hook handle = " + hookHandle + ", error = " + Marshal.GetLastWin32Error());
             if (hookHandle == IntPtr.Zero)
             {
                 MessageBox.Show("Could not install the PrtScn hook. Use the tray icon to capture instead.",
@@ -452,62 +455,105 @@ namespace ScreenshotTool
         {
             if (nCode >= 0)
             {
-                Native.KBDLLHOOKSTRUCT k = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(
-                    lParam, typeof(Native.KBDLLHOOKSTRUCT));
-                if (k.vkCode == Native.VK_S)
+                try
                 {
-                    // Win+Shift+S: take over Windows' own snip shortcut.
-                    int sMsg = wParam.ToInt32();
-                    bool sDown = (sMsg == Native.WM_KEYDOWN || sMsg == Native.WM_SYSKEYDOWN);
-                    bool sUp = (sMsg == Native.WM_KEYUP || sMsg == Native.WM_SYSKEYUP);
-                    bool winShift = (Native.IsDown(Native.VK_LWIN) || Native.IsDown(Native.VK_RWIN))
-                        && Native.IsDown(Native.VK_SHIFT)
-                        && !Native.IsDown(Native.VK_CONTROL)
-                        && !Native.IsDown(Native.VK_MENU);
-
-                    if (sDown && winShift)
-                    {
-                        if (!swallowSKeyUp)
-                        {
-                            swallowSKeyUp = true;
-                            Post(CaptureMode.Region);
-                        }
-                        return (IntPtr)1;
-                    }
-                    if (sUp && swallowSKeyUp)
-                    {
-                        swallowSKeyUp = false;
-                        return (IntPtr)1;
-                    }
-                }
-                else if (k.vkCode == Native.VK_SNAPSHOT)
-                {
+                    Native.KBDLLHOOKSTRUCT k = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(
+                        lParam, typeof(Native.KBDLLHOOKSTRUCT));
                     int msg = wParam.ToInt32();
                     bool down = (msg == Native.WM_KEYDOWN || msg == Native.WM_SYSKEYDOWN);
                     bool up = (msg == Native.WM_KEYUP || msg == Native.WM_SYSKEYUP);
-                    bool win = Native.IsDown(Native.VK_LWIN) || Native.IsDown(Native.VK_RWIN);
+                    int vk = (int)k.vkCode;
 
-                    if (down && !win)
+                    // Track modifier state ourselves; GetAsyncKeyState is unreliable inside LL hooks.
+                    if (vk >= 0 && vk < 256)
                     {
-                        // Ignore key auto-repeat while the key is held; only the first press captures.
-                        if (!swallowKeyUp)
+                        if (down) keys[vk] = true;
+                        else if (up) keys[vk] = false;
+                    }
+                    bool win = keys[Native.VK_LWIN] || keys[Native.VK_RWIN];
+                    bool shift = keys[0xA0] || keys[0xA1] || keys[Native.VK_SHIFT];
+                    bool ctrl = keys[0xA2] || keys[0xA3] || keys[Native.VK_CONTROL];
+                    bool alt = keys[0xA4] || keys[0xA5] || keys[Native.VK_MENU];
+
+                    if (vk == Native.VK_S)
+                    {
+                        // Win+Shift+S: take over Windows' own snip shortcut.
+                        if (down && win && shift && !ctrl && !alt)
                         {
-                            swallowKeyUp = true;
-                            CaptureMode mode = CaptureMode.Region;
-                            if (Native.IsDown(Native.VK_CONTROL)) mode = CaptureMode.Monitor;
-                            else if (Native.IsDown(Native.VK_MENU)) mode = CaptureMode.Window;
-                            Post(mode);
+                            Log("Win+Shift+S down -> capture");
+                            if (!swallowSKeyUp)
+                            {
+                                swallowSKeyUp = true;
+                                Post(CaptureMode.Region);
+                            }
+                            return (IntPtr)1;
                         }
-                        return (IntPtr)1; // swallow so Windows' own Snipping Tool does not open
+                        if (up && swallowSKeyUp)
+                        {
+                            swallowSKeyUp = false;
+                            return (IntPtr)1;
+                        }
                     }
-                    if (up && swallowKeyUp)
+                    else if (vk == Native.VK_SNAPSHOT)
                     {
-                        swallowKeyUp = false;
-                        return (IntPtr)1;
+                        Log("PrtScn " + (down ? "down" : "up") + " win=" + win + " ctrl=" + ctrl + " alt=" + alt);
+                        CaptureMode mode = CaptureMode.Region;
+                        if (ctrl) mode = CaptureMode.Monitor;
+                        else if (alt) mode = CaptureMode.Window;
+
+                        if (down)
+                        {
+                            if (win)
+                            {
+                                snapshotPassed = true; // Win+PrtScn: leave it to Windows
+                            }
+                            else
+                            {
+                                // Ignore key auto-repeat; only the first press captures.
+                                if (!swallowKeyUp)
+                                {
+                                    swallowKeyUp = true;
+                                    Post(mode);
+                                }
+                                return (IntPtr)1; // swallow so Windows' Snipping Tool does not open
+                            }
+                        }
+                        else if (up)
+                        {
+                            if (snapshotPassed)
+                            {
+                                snapshotPassed = false;
+                            }
+                            else if (swallowKeyUp)
+                            {
+                                swallowKeyUp = false;
+                                return (IntPtr)1;
+                            }
+                            else if (!win)
+                            {
+                                // Some keyboards/drivers only report the key-up for PrtScn.
+                                Post(mode);
+                                return (IntPtr)1;
+                            }
+                        }
                     }
+                }
+                catch (Exception ex)
+                {
+                    Log("hook error: " + ex.Message);
                 }
             }
             return Native.CallNextHookEx(hookHandle, nCode, wParam, lParam);
+        }
+
+        private static void Log(string text)
+        {
+            try
+            {
+                File.AppendAllText(Path.Combine(Path.GetTempPath(), "screenshot-tool.log"),
+                    DateTime.Now.ToString("HH:mm:ss.fff") + "  " + text + "\r\n");
+            }
+            catch (Exception) { }
         }
 
         private void Post(CaptureMode mode)
@@ -565,6 +611,7 @@ namespace ScreenshotTool
             }
             catch (Exception ex)
             {
+                Log("capture error: " + ex.ToString());
                 try
                 {
                     tray.ShowBalloonTip(3000, "Screenshot failed", ex.Message, ToolTipIcon.Error);
