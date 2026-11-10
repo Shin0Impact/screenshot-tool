@@ -14,7 +14,7 @@ A neutral icon appears in the tray (white on a dark taskbar, dark on a light one
 |-----|--------|
 | `PrtScn` or `Win+Shift+S` | opens the **capture bar** (below) in the mode you used last |
 | `Alt+PrtScn` | capture bar in window mode |
-| `Ctrl+PrtScn` | instantly capture the monitor the mouse is on |
+| `Ctrl+PrtScn` | open the capture bar in Monitor mode: hover a monitor, click to capture it |
 | `Shift+PrtScn` | instantly capture all monitors side by side, scaled to the same height (no black gap) |
 | `Win+PrtScn` | untouched, normal Windows behaviour |
 
@@ -28,7 +28,8 @@ The screen freezes and a bar appears at the top, like Snipping Tool.
 - **Window**: hover a window to highlight it, click to capture it (works on any monitor, focused or not).
 - **Monitor**: hover a monitor to highlight it, click to capture it (pick the left or right one, regardless of where you started). **All monitors**: captures immediately.
 - Clicking outside an existing selection only deselects it; it no longer captures the whole monitor.
-- **Delay 3s / 5s / 10s**: closes the bar, counts down, then freezes the screen again, so you can open a menu or tooltip first.
+- **Annotate** (off by default): after capturing, opens an editor with pen, arrow, box, highlight and text, six colours, four sizes and undo. `Enter` keeps the result, `Esc` discards it.
+- Pressing the shortcut again while the bar is open closes it and opens a fresh one.
 - **Adjust** (toggle): after drawing a region you can drag its handles, drag inside to move it,
   nudge with the arrow keys (Shift = 10 px, Ctrl+arrows = resize), then press **Enter**, double-click, or click *Capture*.
   Turn it off to capture as soon as you release the mouse.
