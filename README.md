@@ -69,3 +69,12 @@ program's keyboard hook see keys typed into an elevated window, such as a game t
 as administrator, so without this the hotkeys silently do nothing there and Windows' own
 Snipping Tool opens instead. "Start with Windows" creates a scheduled task that runs with the
 highest privileges, so it starts at login without a prompt.
+
+### Without administrator rights (UIAccess build)
+
+`Screenshot-UIAccess.exe` gives the same reach over elevated windows while running as a normal
+user. Windows only starts a UIAccess exe if it is signed with a certificate the machine trusts and
+installed in Program Files, so run `Install-UIAccess.ps1` once (it asks for administrator rights
+once): it creates a local self-signed certificate, signs and installs the exe to
+`C:\Program Files\ScreenshotTool` and sets it to start at logon, not elevated. The log then lives in
+`%LOCALAPPDATA%\ScreenshotTool`. `Install-UIAccess.ps1 -Uninstall` removes everything again.

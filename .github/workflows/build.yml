@@ -22,10 +22,20 @@ jobs:
           /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll
           Screenshot.cs
 
+      - name: Compile the UIAccess variant (needs signing + install, see Install-UIAccess.ps1)
+        shell: cmd
+        run: >
+          "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /optimize+
+          /target:winexe /out:Screenshot-UIAccess.exe /win32manifest:app.uiaccess.manifest
+          /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll
+          Screenshot.cs
+
       - uses: actions/upload-artifact@v4
         with:
           name: Screenshot
-          path: Screenshot.exe
+          path: |
+            Screenshot.exe
+            Screenshot-UIAccess.exe
 
       - name: Publish as the "latest" release
         shell: bash
@@ -33,6 +43,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest Screenshot.exe --target "$GITHUB_SHA" \
+          gh release create latest Screenshot.exe Screenshot-UIAccess.exe --target "$GITHUB_SHA" \
             --title "Latest build" \
             --notes "Screenshot.exe built from commit $GITHUB_SHA. Run it, no install needed."

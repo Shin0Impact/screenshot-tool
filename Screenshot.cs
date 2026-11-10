@@ -2106,7 +2106,8 @@ namespace ScreenshotTool
 
             hookProc = HookCallback;
             StartHookThread();
-            Log("started; hook handle = " + hookHandle + ", this app elevated = " + IsElevated((uint)Process.GetCurrentProcess().Id));
+            Log("started; hook handle = " + hookHandle + ", this app elevated = " + IsElevated((uint)Process.GetCurrentProcess().Id)
+                + ", uiAccess = " + HasUiAccess((uint)Process.GetCurrentProcess().Id));
             // Log which program is in front (and whether it runs as administrator). A hook cannot see
             // keys typed into an elevated window, which is the usual reason hotkeys "do nothing" there.
             fgTimer.Interval = 1000;
@@ -2123,7 +2124,10 @@ namespace ScreenshotTool
         // ---- keyboard hook -------------------------------------------------------------
 
         // 1 = elevated, 0 = not elevated, -1 = could not tell (access denied: protected or higher integrity).
-        private static int IsElevated(uint pid)
+        private static int IsElevated(uint pid) { return TokenFlag(pid, 20); }      // TokenElevation
+        private static int HasUiAccess(uint pid) { return TokenFlag(pid, 26); }    // TokenUIAccess
+
+        private static int TokenFlag(uint pid, int tokenClass)
         {
             IntPtr h = Native.OpenProcess(0x1000, false, pid);   // PROCESS_QUERY_LIMITED_INFORMATION
             if (h == IntPtr.Zero) return -1;
@@ -2134,7 +2138,7 @@ namespace ScreenshotTool
                 try
                 {
                     int elev, ret;
-                    if (!Native.GetTokenInformation(tok, 20, out elev, 4, out ret)) return -1;   // TokenElevation
+                    if (!Native.GetTokenInformation(tok, tokenClass, out elev, 4, out ret)) return -1;
                     return elev != 0 ? 1 : 0;
                 }
                 finally { Native.CloseHandle(tok); }
@@ -2303,12 +2307,32 @@ namespace ScreenshotTool
         public static void WriteLog(string text) { Log(text); }
 
         private static readonly object logLock = new object();
+        private static string logPath;
+
+        // Next to the exe when that folder is writable (Program Files is not): %LOCALAPPDATA%\ScreenshotTool.
+        private static string LogPath()
+        {
+            if (logPath != null) return logPath;
+            string p = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshot-tool.log");
+            try
+            {
+                using (FileStream fs = new FileStream(p, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { }
+            }
+            catch (Exception)
+            {
+                string d = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenshotTool");
+                Directory.CreateDirectory(d);
+                p = Path.Combine(d, "screenshot-tool.log");
+            }
+            logPath = p;
+            return p;
+        }
 
         private static void Log(string text)
         {
             try
             {
-                lock (logLock) File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshot-tool.log"),
+                lock (logLock) File.AppendAllText(LogPath(),
                     DateTime.Now.ToString("HH:mm:ss.fff") + "  " + text + "\r\n");
             }
             catch (Exception) { }
@@ -2861,11 +2885,13 @@ namespace ScreenshotTool
                 else
                 {
                     string user = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+                    // An elevated copy needs a highest-privilege task; a UIAccess copy runs as a normal user.
+                    string runLevel = (IsElevated((uint)Process.GetCurrentProcess().Id) == 1) ? "HighestAvailable" : "LeastPrivilege";
                     string xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>"
                         + "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">"
                         + "<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + XmlEscape(user) + "</UserId></LogonTrigger></Triggers>"
                         + "<Principals><Principal id=\"Author\"><UserId>" + XmlEscape(user) + "</UserId>"
-                        + "<LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>"
+                        + "<LogonType>InteractiveToken</LogonType><RunLevel>" + runLevel + "</RunLevel></Principal></Principals>"
                         + "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
                         + "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
                         + "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
