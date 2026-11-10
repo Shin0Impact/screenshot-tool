@@ -1412,6 +1412,7 @@ namespace ScreenshotTool
             try { Close(); } catch (Exception) { }
         }
 
+        public bool FailedToShow;
         public double AgeSeconds { get { return (DateTime.UtcNow - created).TotalSeconds; } }
         public bool NeverShown { get { return !Visible && (DateTime.UtcNow - created).TotalSeconds > 2; } }
 
@@ -2867,6 +2868,7 @@ namespace ScreenshotTool
             busy = true;
             busySince = DateTime.UtcNow;
             pendingPresses = 0;
+            showRetries = 0;
             Diag.Log("capture start, mode " + mode);
             try
             {
@@ -2957,6 +2959,7 @@ namespace ScreenshotTool
         // Shows "Capturing in N..." and waits, keeping the UI responsive. The popup is gone
         // before this returns, so it never ends up in the screenshot.
         private static SelectionForm openOverlay;
+        private static int showRetries;
         private static int pendingPresses;   // shortcut presses that arrived while no overlay could take them
         private static AnnotateForm openAnnotate;
         private DateTime busySince = DateTime.UtcNow;
@@ -3226,8 +3229,31 @@ namespace ScreenshotTool
                     // every press closes the overlay and opens a fresh one, so each queued press does one more cycle
                     if (pendingPresses > 0) { pendingPresses--; Diag.Log("queued press taken: " + pendingPresses + " left"); shownForm.RestartFresh(); }
                 };
+                // Sometimes the overlay's window never comes up (the form says it is open but has no window, and every
+                // press and click goes to whatever is behind it). Check shortly after showing and start over if so.
+                System.Windows.Forms.Timer showCheck = new System.Windows.Forms.Timer();
+                showCheck.Interval = 400;
+                showCheck.Tick += delegate
+                {
+                    showCheck.Stop();
+                    if (!form.IsHandleCreated && showRetries < 3)
+                    {
+                        showRetries++;
+                        Diag.Log("overlay window never appeared: starting it again (try " + showRetries + ")");
+                        form.FailedToShow = true;
+                        form.ForceClose();
+                    }
+                };
+                showCheck.Start();
                 try { form.ShowDialog(); }
-                finally { openOverlay = null; }
+                finally { openOverlay = null; showCheck.Stop(); showCheck.Dispose(); }
+                if (form.FailedToShow)
+                {
+                    res.Restart = true;
+                    res.RestartDelay = 0;
+                    res.RestartMode = startMode;
+                    return res;
+                }
                 Diag.Log("overlay closed after " + ov.ElapsedMilliseconds + " ms: " + form.Outcome
                     + (form.CloseReason.Length > 0 ? " (" + form.CloseReason + ")" : ""));
 
