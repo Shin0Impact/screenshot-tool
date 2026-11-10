@@ -616,6 +616,16 @@ namespace ScreenshotTool
             if (hasSelection) FinishRect(sel);
         }
 
+        // Shortcut pressed again while open: close and reopen on a fresh screenshot.
+        public void RestartFresh()
+        {
+            CloseReason = "shortcut again";
+            Outcome = OverlayOutcome.DelayRestart;
+            DelaySeconds = 0;
+            RestartMode = mode;
+            Close();
+        }
+
         private void Cancel(string why)
         {
             CloseReason = why;
@@ -706,9 +716,17 @@ namespace ScreenshotTool
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            // Anything that did not go through Cancel()/Finish*() was closed from outside.
+            // Anything that did not go through Cancel()/Finish*() was closed from outside. The log showed
+            // unexplained closes (no key, no click, CloseReason.None) a fraction of a second after opening,
+            // so those are refused: the overlay only ever closes through its own buttons and keys.
             if (CloseReason.Length == 0 && Outcome == OverlayOutcome.Cancelled)
             {
+                if (e.CloseReason == System.Windows.Forms.CloseReason.None)
+                {
+                    TrayApp.WriteLog("ignored a spurious close (CloseReason.None)");
+                    e.Cancel = true;
+                    return;
+                }
                 CloseReason = "external (" + e.CloseReason + ")";
                 TrayApp.WriteLog("external close, dialog result = " + DialogResult + ", stack: "
                     + Environment.StackTrace.Replace("\r\n", " | "));
@@ -1709,7 +1727,12 @@ namespace ScreenshotTool
         private void Capture(CaptureMode mode)
         {
             Log("Capture called, mode=" + mode + ", busy=" + busy);
-            if (busy) return;
+            if (busy)
+            {
+                // Pressing the shortcut again while the overlay is open starts a fresh capture.
+                if (openOverlay != null && !openOverlay.IsDisposed) openOverlay.RestartFresh();
+                return;
+            }
             busy = true;
             try
             {
@@ -1768,8 +1791,17 @@ namespace ScreenshotTool
 
         // Shows "Capturing in N..." and waits, keeping the UI responsive. The popup is gone
         // before this returns, so it never ends up in the screenshot.
+        private static SelectionForm openOverlay;
+
         private static void Countdown(int seconds, Rectangle monitor)
         {
+            if (seconds <= 0)
+            {
+                // quick restart: just let the old overlay disappear before the screen is grabbed again
+                DateTime quick = DateTime.UtcNow.AddMilliseconds(120);
+                while (DateTime.UtcNow < quick) { Application.DoEvents(); Thread.Sleep(10); }
+                return;
+            }
             Toast t = null;
             try
             {
@@ -2020,7 +2052,9 @@ namespace ScreenshotTool
             using (SelectionForm form = new SelectionForm(desktop, vs, windows, MonitorRects(), mon, startMode))
             {
                 Log("grabbed desktop, showing overlay");
-                form.ShowDialog();
+                openOverlay = form;
+                try { form.ShowDialog(); }
+                finally { openOverlay = null; }
                 Log("overlay closed, outcome = " + form.Outcome + ", selection = " + form.Result
                     + (form.CloseReason.Length > 0 ? ", reason = " + form.CloseReason : ""));
 
