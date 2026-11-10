@@ -91,6 +91,12 @@ namespace ScreenshotTool
         }
 
         [DllImport("user32.dll")]
+        public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+        [DllImport("user32.dll")]
+        public static extern bool BringWindowToTop(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+        [DllImport("user32.dll")]
         public static extern int GetMessage(out MSG msg, IntPtr hWnd, uint min, uint max);
         [DllImport("user32.dll")]
         public static extern bool TranslateMessage(ref MSG msg);
@@ -643,9 +649,27 @@ namespace ScreenshotTool
             // Force the exact physical-pixel rectangle, whatever DPI the window thinks it has.
             Native.SetWindowPos(Handle, Native.HWND_TOPMOST, bounds.X, bounds.Y, bounds.Width, bounds.Height,
                 Native.SWP_SHOWWINDOW);
-            Native.SetForegroundWindow(Handle);
+            TakeForeground();
             Activate();
             Focus();
+            // A game in front may fight for the top spot: check a moment later and re-assert.
+            System.Windows.Forms.Timer check = new System.Windows.Forms.Timer();
+            check.Interval = 150;
+            check.Tick += delegate
+            {
+                check.Stop();
+                check.Dispose();
+                if (IsDisposed) return;
+                bool fg = (Native.GetForegroundWindow() == Handle);
+                TrayApp.WriteLog("overlay foreground = " + fg + ", visible = " + Visible);
+                if (!fg)
+                {
+                    Native.SetWindowPos(Handle, Native.HWND_TOPMOST, bounds.X, bounds.Y, bounds.Width,
+                        bounds.Height, Native.SWP_SHOWWINDOW);
+                    TakeForeground();
+                }
+            };
+            check.Start();
 
             if (windowMode)
             {
@@ -653,6 +677,24 @@ namespace ScreenshotTool
                 Native.GetCursorPos(out pt);
                 UpdateHover(new Point(pt.X - bounds.X, pt.Y - bounds.Y));
             }
+        }
+
+        // Windows only lets the foreground app hand focus over; joining its input queue briefly gets
+        // around that so the overlay can sit above a full-screen game.
+        private void TakeForeground()
+        {
+            try
+            {
+                IntPtr fg = Native.GetForegroundWindow();
+                uint pid;
+                uint fgThread = (fg == IntPtr.Zero) ? 0 : Native.GetWindowThreadProcessId(fg, out pid);
+                uint me = Native.GetCurrentThreadId();
+                bool attached = (fgThread != 0 && fgThread != me) && Native.AttachThreadInput(me, fgThread, true);
+                Native.BringWindowToTop(Handle);
+                Native.SetForegroundWindow(Handle);
+                if (attached) Native.AttachThreadInput(me, fgThread, false);
+            }
+            catch (Exception) { }
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -1895,6 +1937,21 @@ namespace ScreenshotTool
             List<Rectangle> windows = CollectWindows();
             Log("virtual screen = " + vs + ", monitor = " + mon + ", mode = " + startMode
                 + ", windows = " + windows.Count);
+
+            try
+            {
+                IntPtr fg = Native.GetForegroundWindow();
+                uint fpid;
+                Native.GetWindowThreadProcessId(fg, out fpid);
+                StringBuilder fcls = new StringBuilder(64);
+                Native.GetClassName(fg, fcls, 64);
+                Native.RECT fr;
+                Native.GetWindowRect(fg, out fr);
+                string pname = "?";
+                try { using (Process fp = Process.GetProcessById((int)fpid)) pname = fp.ProcessName; } catch (Exception) { }
+                Log("foreground before overlay: " + pname + " class=" + fcls + " rect=" + Native.ToRectangle(fr));
+            }
+            catch (Exception) { }
 
             OverlayResult res = new OverlayResult();
             using (Bitmap desktop = Grab(vs, PixelFormat.Format32bppRgb))
