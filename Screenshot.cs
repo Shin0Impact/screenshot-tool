@@ -659,7 +659,11 @@ namespace ScreenshotTool
         {
             // Anything that did not go through Cancel()/Finish*() was closed from outside.
             if (CloseReason.Length == 0 && Outcome == OverlayOutcome.Cancelled)
+            {
                 CloseReason = "external (" + e.CloseReason + ")";
+                TrayApp.WriteLog("external close, dialog result = " + DialogResult + ", stack: "
+                    + Environment.StackTrace.Replace("\r\n", " | "));
+            }
             base.OnFormClosing(e);
         }
 
