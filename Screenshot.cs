@@ -116,6 +116,8 @@ namespace ScreenshotTool
         public static extern uint GetCurrentThreadId();
 
         [DllImport("user32.dll", SetLastError = true)]
+        public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+        [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -2388,6 +2390,30 @@ namespace ScreenshotTool
             }
         }
 
+        // Windows silently drops a low-level keyboard hook that was ever too slow, after which no shortcut works
+        // (tray icon there, nothing opens). Every few seconds send a harmless key (an unassigned virtual key)
+        // and check the hook saw it; if not, install the hook again.
+        private int hookEvents;
+        private void CheckHook()
+        {
+            try
+            {
+                int before = hookEvents;
+                Native.keybd_event(0xE8, 0, 0, UIntPtr.Zero);
+                Native.keybd_event(0xE8, 0, 2, UIntPtr.Zero);
+                Thread.Sleep(400);
+                if (hookEvents != before) return;
+                Diag.Log("keyboard hook stopped receiving keys: installing it again");
+                if (hookThreadId != 0) Native.PostThreadMessage(hookThreadId, 0x0012, IntPtr.Zero, IntPtr.Zero);   // WM_QUIT
+                Thread old = hookThread;
+                if (old != null) old.Join(1000);
+                Array.Clear(keys, 0, keys.Length);
+                swallowSKeyUp = false;
+                StartHookThread();
+            }
+            catch (Exception ex) { Diag.Log("hook check failed: " + ex.Message); }
+        }
+
         // If the UI thread stops answering for a while (the symptom: tray icon there, nothing opens), start a
         // fresh copy and quit this one.
         private void Watchdog()
@@ -2395,6 +2421,7 @@ namespace ScreenshotTool
             for (;;)
             {
                 Thread.Sleep(4000);
+                CheckHook();
                 ManualResetEvent answered = new ManualResetEvent(false);
                 Stopwatch lat = Stopwatch.StartNew();
                 try { sync.BeginInvoke(new Action(delegate { answered.Set(); })); }
@@ -2615,6 +2642,7 @@ namespace ScreenshotTool
         {
             if (nCode >= 0)
             {
+                hookEvents++;
                 try
                 {
                     Native.KBDLLHOOKSTRUCT k = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(
