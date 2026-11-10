@@ -3166,7 +3166,7 @@ try {
   Write-Output ('FAILED: ' + $_.Exception.Message)
   exit 1
 }
-".Replace("__SRC__", Q(tmp)).Replace("__DIR__", Q(InstallDir)).Replace("__VER__", Q(version)).Replace("__USER__", Q(user)).Replace("__LAUNCHER__", Q(Application.ExecutablePath)).Replace("__OLD__", Q(oldDir));
+".Replace("__SRC__", Q(tmp)).Replace("__DIR__", Q(InstallDir)).Replace("__VER__", Q(version)).Replace("__USER__", Q(user)).Replace("__LAUNCHER__", Q(Application.ExecutablePath)).Replace("__OLD__", Q(oldDir ?? ""));
                 code = RunPowerShell(script, out output);
             }
             catch (Exception ex)
