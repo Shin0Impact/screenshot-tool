@@ -400,7 +400,7 @@ namespace ScreenshotTool
                     g.DrawImage(small, r, (sp.X - FrostBackdrop.Origin.X) / k, (sp.Y - FrostBackdrop.Origin.Y) / k,
                         r.Width / k, r.Height / k, GraphicsUnit.Pixel, ia);
                 }
-                using (SolidBrush tint = new SolidBrush(Theme.Light ? Color.FromArgb(188, 243, 243, 245) : Color.FromArgb(180, 30, 30, 34)))
+                using (SolidBrush tint = new SolidBrush(Theme.Frost))
                     g.FillRectangle(tint, r);
             }
             else
@@ -454,7 +454,7 @@ namespace ScreenshotTool
     static class Theme
     {
         public static bool Light;
-        public static Color Bar, BarBorder, Text, Muted, OnFill, OnText, Hover, Accent, AccentText;
+        public static Color Frost, Bar, BarBorder, Text, Muted, OnFill, OnText, Hover, Accent, AccentText;
 
         private static bool ReadFlag(string name)
         {
@@ -481,9 +481,10 @@ namespace ScreenshotTool
             Light = ReadFlag("AppsUseLightTheme");
             if (Light)
             {
+                Frost = Color.FromArgb(188, 243, 243, 245);
                 Bar = Color.FromArgb(246, 243, 243, 243);
-                BarBorder = Color.FromArgb(70, 0, 0, 0);
-                Text = Color.FromArgb(255, 32, 32, 32);
+                BarBorder = Color.FromArgb(50, 0, 0, 0);
+                Text = Color.FromArgb(255, 25, 25, 25);
                 Muted = Color.FromArgb(255, 110, 110, 110);
                 OnFill = Color.FromArgb(255, 40, 40, 40);
                 OnText = Color.White;
@@ -493,13 +494,14 @@ namespace ScreenshotTool
             }
             else
             {
+                Frost = Color.FromArgb(180, 30, 30, 34);
                 Bar = Color.FromArgb(244, 32, 32, 32);
-                BarBorder = Color.FromArgb(80, 255, 255, 255);
-                Text = Color.White;
+                BarBorder = Color.FromArgb(50, 255, 255, 255);
+                Text = Color.FromArgb(255, 240, 240, 240);
                 Muted = Color.FromArgb(255, 160, 160, 160);
                 OnFill = Color.FromArgb(255, 235, 235, 235);
                 OnText = Color.FromArgb(255, 25, 25, 25);
-                Hover = Color.FromArgb(55, 255, 255, 255);
+                Hover = Color.FromArgb(46, 255, 255, 255);
                 Accent = Color.FromArgb(255, 235, 235, 235);
                 AccentText = Color.FromArgb(255, 25, 25, 25);
             }
@@ -1987,37 +1989,30 @@ namespace ScreenshotTool
             return p;
         }
 
-        private Bitmap acrylic;
+        private Bitmap acrylic;          // the screen around the toolbar, shrunk (see FrostBackdrop.Factor)
+        private Point acrylicOrigin;      // where that picture starts, in screen-shot pixels
         private Rectangle acrylicFor;
 
-        // The area behind the toolbar from the untouched screenshot, blurred (shrunk, then stretched back).
         private void EnsureAcrylic()
         {
             if (acrylic != null && acrylicFor == toolbarRect) return;
             if (acrylic != null) { acrylic.Dispose(); acrylic = null; }
             acrylicFor = toolbarRect;
-            Rectangle r = Rectangle.Intersect(toolbarRect, new Rectangle(0, 0, shot.Width, shot.Height));
+            Rectangle r = Rectangle.Intersect(Rectangle.Inflate(toolbarRect, 96, 96), new Rectangle(0, 0, shot.Width, shot.Height));
             if (r.Width < 4 || r.Height < 4) return;
             try
             {
-                Bitmap result = new Bitmap(toolbarRect.Width, toolbarRect.Height, PixelFormat.Format32bppArgb);
-                int sw = Math.Max(2, r.Width / 14), sh = Math.Max(2, r.Height / 14);
-                using (Bitmap small = new Bitmap(sw, sh, PixelFormat.Format32bppArgb))
+                float k = FrostBackdrop.Factor;
+                int sw = Math.Max(2, (int)(r.Width / k)), sh = Math.Max(2, (int)(r.Height / k));
+                Bitmap small = new Bitmap(sw, sh, PixelFormat.Format32bppRgb);
+                using (Graphics sg = Graphics.FromImage(small))
                 {
-                    using (Graphics sg = Graphics.FromImage(small))
-                    {
-                        sg.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                        sg.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                        sg.DrawImage(shot, new Rectangle(0, 0, sw, sh), r.X, r.Y, r.Width, r.Height, GraphicsUnit.Pixel);
-                    }
-                    using (Graphics rg = Graphics.FromImage(result))
-                    {
-                        rg.InterpolationMode = InterpolationMode.HighQualityBilinear;
-                        rg.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                        rg.DrawImage(small, new Rectangle(r.X - toolbarRect.X, r.Y - toolbarRect.Y, r.Width, r.Height));
-                    }
+                    sg.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    sg.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    sg.DrawImage(shot, new Rectangle(0, 0, sw, sh), r.X, r.Y, r.Width, r.Height, GraphicsUnit.Pixel);
                 }
-                acrylic = result;
+                acrylic = small;
+                acrylicOrigin = r.Location;
             }
             catch (Exception) { acrylic = null; }
         }
@@ -2030,16 +2025,28 @@ namespace ScreenshotTool
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
             EnsureAcrylic();
-            using (GraphicsPath gp = RoundedRect(toolbarRect, (int)(12 * scale)))
+            using (GraphicsPath gp = RoundedRect(toolbarRect, (int)(8 * scale)))
             {
                 // Frosted look: the blurred desktop behind the bar, a matte tint on top, a soft edge.
                 GraphicsState st = g.Save();
                 g.SetClip(gp, CombineMode.Intersect);
-                if (acrylic != null) g.DrawImage(acrylic, toolbarRect);
-                using (SolidBrush tint = new SolidBrush(Theme.Light ? Color.FromArgb(150, 244, 244, 246) : Color.FromArgb(168, 22, 26, 34)))
+                if (acrylic != null)
+                {
+                    // same blur and tint as the tray menu: the screen behind, shrunk 16x and stretched back
+                    float k = FrostBackdrop.Factor;
+                    using (System.Drawing.Imaging.ImageAttributes ia = new System.Drawing.Imaging.ImageAttributes())
+                    {
+                        ia.SetWrapMode(WrapMode.TileFlipXY);
+                        g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                        g.PixelOffsetMode = PixelOffsetMode.Half;
+                        g.DrawImage(acrylic, toolbarRect, (toolbarRect.X - acrylicOrigin.X) / k, (toolbarRect.Y - acrylicOrigin.Y) / k,
+                            toolbarRect.Width / k, toolbarRect.Height / k, GraphicsUnit.Pixel, ia);
+                    }
+                }
+                using (SolidBrush tint = new SolidBrush(Theme.Frost))
                     g.FillRectangle(tint, toolbarRect);
                 g.Restore(st);
-                using (Pen border = new Pen(Theme.Light ? Color.FromArgb(60, 0, 0, 0) : Color.FromArgb(60, 255, 255, 255), 1f))
+                using (Pen border = new Pen(Theme.BarBorder, 1f))
                     g.DrawPath(border, gp);
             }
 
