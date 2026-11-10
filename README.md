@@ -5,39 +5,56 @@ One C# file, no dependencies, no installer, no sound.
 
 ## Build and run
 
-Double-click `build.bat`. It compiles `Screenshot.cs` with the C# compiler built into
-Windows and starts `Screenshot.exe`. A blue icon appears in the tray.
+Double-click `build.bat`, or grab `Screenshot.exe` from the **latest** release (built by GitHub Actions).
+A blue icon appears in the tray.
 
 ## Hotkeys
 
-| Key           | Action                                   |
-|---------------|------------------------------------------|
-| `PrtScn` or `Win+Shift+S` | drag a region, or just click to take the whole monitor under the mouse (Esc / right-click cancels) |
-| `Ctrl+PrtScn` | whole monitor the mouse is on            |
-| `Alt+PrtScn`  | hover a window to highlight it, click to capture it |
-| `Shift+PrtScn` | all monitors side by side, scaled to the same height (no black gap) |
-| `Win+PrtScn`  | untouched, normal Windows behaviour      |
+| Key | Action |
+|-----|--------|
+| `PrtScn` or `Win+Shift+S` | opens the **capture bar** (below) in the mode you used last |
+| `Alt+PrtScn` | capture bar in window mode |
+| `Ctrl+PrtScn` | instantly capture the monitor the mouse is on |
+| `Shift+PrtScn` | instantly capture all monitors side by side, scaled to the same height (no black gap) |
+| `Win+PrtScn` | untouched, normal Windows behaviour |
 
 While the app runs it takes over `PrtScn` and `Win+Shift+S`, so Windows' Snipping Tool no longer opens.
-Right-click the tray icon to open the folder, start with Windows, or set the **click tolerance**:
-how many pixels the mouse may move during a click and still count as a click (whole monitor).
-Default is 12 px.
+
+## Capture bar
+
+The screen freezes and a bar appears at the top, like Snipping Tool.
+
+- **Region**: drag a rectangle. A plain click (no drag) takes the whole monitor under the mouse.
+- **Window**: hover a window to highlight it, click to capture it (works on any monitor, focused or not).
+- **Monitor** / **All monitors**: capture immediately.
+- **Delay 3s / 5s / 10s**: closes the bar, counts down, then freezes the screen again, so you can open a menu or tooltip first.
+- **Adjust** (toggle): after drawing a region you can drag its handles, drag inside to move it,
+  nudge with the arrow keys (Shift = 10 px, Ctrl+arrows = resize), then press **Enter**, double-click, or click *Capture*.
+  Turn it off to capture as soon as you release the mouse.
+- **Save** / **Copy** (toggles): write a PNG file and/or put the shot on the clipboard. At least one stays on.
+- `Esc` or **X** closes. Right-click clears the selection, or closes if there is none.
+
+All toggles are remembered. They are also in the tray menu, together with the **click tolerance**
+(how many pixels the mouse may move during a click and still count as a click; default 12 px).
 
 ## Where files go
 
 `Pictures\Screenshots\Screenshot_<date>_<time>.png`
 
-The clipboard gets the image **and** the file, so pasting into a chat or Explorer sends
+With *Copy* on, the clipboard gets the image **and** the file, so pasting into a chat or Explorer sends
 the original PNG instead of a re-encoded copy.
 
 ## Why quality holds up
 
 The app is per-monitor DPI aware (see `app.manifest`), so every capture is a 1:1 copy of the
-screen's real pixels on each monitor. Nothing is resized.
+screen's real pixels on each monitor. Nothing is resized, except when you ask for
+*All monitors*, where the shorter monitor is scaled up to match the taller one.
 
 ## Limits
 
 - Games in **exclusive fullscreen** can come out black. Use borderless windowed.
-- If the game is running **as administrator**, Windows hides the key from a normal app.
-  Run `Screenshot.exe` as administrator too, or use `Win+PrtScn` in that game.
+- If the foreground app runs **as administrator**, Windows hides the key from a normal app.
+  Run `Screenshot.exe` as administrator too.
 - Some anti-cheat systems dislike any keyboard hook. Quit the app before playing those.
+
+`screenshot-tool.log` next to the exe records start-up and capture timings, useful for debugging.

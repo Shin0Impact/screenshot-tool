@@ -2,7 +2,8 @@
 // No dependencies: compiles with the C# compiler that ships with Windows (see build.bat).
 //
 // Hotkeys (PrtScn is taken over from Windows' Snipping Tool while this runs):
-//   PrtScn        select a region (Win+Shift+S does the same)
+//   PrtScn        capture bar: region / window / monitor / all monitors, delay, toggles
+//                 (Win+Shift+S does the same)
 //   Ctrl+PrtScn   whole monitor the mouse is on
 //   Alt+PrtScn    pick a window (hover to highlight, click to capture)
 //   Shift+PrtScn  all monitors side by side, scaled to the same height
@@ -172,6 +173,9 @@ namespace ScreenshotTool
         [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
         public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
+        [DllImport("shcore.dll")]
+        public static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
+
         [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
         public static extern int DwmGetWindowAttributeInt(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
 
@@ -193,31 +197,146 @@ namespace ScreenshotTool
         }
     }
 
-    // Full-screen overlay used to drag out a region, or (window mode) to pick a window.
-    // It shows a frozen copy of the desktop 1:1 (one image pixel = one screen pixel).
+    // Persistent settings (HKCU\Software\ScreenshotTool).
+    static class Settings
+    {
+        private const string KeyPath = @"Software\ScreenshotTool";
+
+        public static bool SaveFile = true;        // write a PNG file
+        public static bool CopyClipboard = true;   // put the shot on the clipboard
+        public static bool Adjust = true;          // let the selection be adjusted before capturing
+        public static bool WindowModeLast;         // last overlay mode: false = region, true = window
+        public static int ClickTolerance = 12;     // px the mouse may move and still count as a click
+
+        public static void Load()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(KeyPath, false))
+                {
+                    if (k == null) return;
+                    SaveFile = GetBool(k, "SaveFile", true);
+                    CopyClipboard = GetBool(k, "CopyClipboard", true);
+                    Adjust = GetBool(k, "Adjust", true);
+                    WindowModeLast = GetBool(k, "WindowModeLast", false);
+                    object v = k.GetValue("ClickTolerance");
+                    if (v is int && (int)v >= 0 && (int)v <= 200) ClickTolerance = (int)v;
+                    if (!SaveFile && !CopyClipboard) CopyClipboard = true;
+                }
+            }
+            catch (Exception) { }
+        }
+
+        private static bool GetBool(RegistryKey k, string name, bool fallback)
+        {
+            object v = k.GetValue(name);
+            if (v is int) return ((int)v) != 0;
+            return fallback;
+        }
+
+        public static void Save()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(KeyPath))
+                {
+                    k.SetValue("SaveFile", SaveFile ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("CopyClipboard", CopyClipboard ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("Adjust", Adjust ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("WindowModeLast", WindowModeLast ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("ClickTolerance", ClickTolerance, RegistryValueKind.DWord);
+                }
+            }
+            catch (Exception) { }
+        }
+
+        // At least one output (file or clipboard) always stays on.
+        public static void ToggleSave()
+        {
+            SaveFile = !SaveFile;
+            if (!SaveFile && !CopyClipboard) CopyClipboard = true;
+            Save();
+        }
+
+        public static void ToggleCopy()
+        {
+            CopyClipboard = !CopyClipboard;
+            if (!CopyClipboard && !SaveFile) SaveFile = true;
+            Save();
+        }
+    }
+
+    enum OverlayOutcome { Cancelled, Rect, AllMonitors, DelayRestart }
+
+    class OverlayResult
+    {
+        public Bitmap Image;
+        public bool Restart;
+        public int RestartDelay;
+        public bool RestartWindowMode;
+    }
+
+    class ToolbarButton
+    {
+        public string Text;
+        public Rectangle Rect;
+        public bool IsSeparator;
+        public bool IsLabel;
+        public Func<bool> IsOn;   // toggle / mode state (null = plain button)
+        public Action Click;
+    }
+
+    // Full-screen overlay: a frozen 1:1 copy of the desktop (one image pixel = one screen pixel)
+    // with a capture bar at the top, like Snipping Tool. Region mode: drag a rectangle, then adjust
+    // it with handles / arrow keys and confirm. Window mode: hover a window and click.
     class SelectionForm : Form
     {
         private readonly Bitmap shot;
         private readonly Bitmap dimmed;
-        private readonly Rectangle bounds;
-        private readonly List<Rectangle> windows; // null = free region mode
-        private bool dragging;
+        private readonly Rectangle bounds;             // virtual screen, screen coordinates
+        private readonly List<Rectangle> windows;      // screen coordinates, top-most first
+        private readonly Rectangle monitorClient;      // monitor that carries the bar, client coordinates
+        private readonly float scale;
+        private readonly Font uiFont;
+        private readonly Font labelFont;
+        private readonly StringFormat textFormat = new StringFormat();
+        private readonly List<ToolbarButton> buttons = new List<ToolbarButton>();
+        private Rectangle toolbarRect;
+        private ToolbarButton hoverButton;
+
+        private bool windowMode;
+        private bool dragging;       // drawing a new selection
+        private bool exceeded;       // pointer left the click-tolerance zone during this drag
         private Point start;
-        private Rectangle sel = Rectangle.Empty;
+        private Rectangle sel = Rectangle.Empty;   // region selection, or the hovered window
+        private bool hasSelection;   // a finished region that can still be adjusted
+        private int activeHandle = -1;             // 0-7 = resize handle, 8 = move, -1 = none
+        private Rectangle dragOrig;
+        private Point dragOrigPoint;
         private bool firstPaintLogged;
-        private bool exceeded;      // pointer left the click-tolerance zone during this drag
-        private readonly int tolerance;
-        private readonly Font labelFont = new Font("Segoe UI", 10f, FontStyle.Bold, GraphicsUnit.Point);
 
-        public Rectangle Result = Rectangle.Empty; // in bitmap pixels
+        public OverlayOutcome Outcome = OverlayOutcome.Cancelled;
+        public Rectangle Result = Rectangle.Empty;   // bitmap pixels
+        public int DelaySeconds;
+        public bool RestartInWindowMode;
 
-        public SelectionForm(Bitmap desktopShot, Rectangle screenBounds, List<Rectangle> windowRects, int clickTolerance)
+        public SelectionForm(Bitmap desktopShot, Rectangle screenBounds, List<Rectangle> windowRects,
+            Rectangle toolbarMonitorScreen, bool startInWindowMode)
         {
-            tolerance = clickTolerance;
             shot = desktopShot;
             bounds = screenBounds;
             windows = windowRects;
+            windowMode = startInWindowMode;
+            monitorClient = new Rectangle(toolbarMonitorScreen.X - screenBounds.X,
+                toolbarMonitorScreen.Y - screenBounds.Y, toolbarMonitorScreen.Width, toolbarMonitorScreen.Height);
+            scale = MonitorScale(toolbarMonitorScreen);
+            uiFont = new Font("Segoe UI", 15f * scale, FontStyle.Regular, GraphicsUnit.Pixel);
+            labelFont = new Font("Segoe UI", 14f * scale, FontStyle.Bold, GraphicsUnit.Pixel);
+            textFormat.Alignment = StringAlignment.Center;
+            textFormat.LineAlignment = StringAlignment.Center;
+            textFormat.FormatFlags = StringFormatFlags.NoWrap;
             dimmed = MakeDimmed(desktopShot);
+
             AutoScaleMode = AutoScaleMode.None;
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
@@ -228,6 +347,23 @@ namespace ScreenshotTool
             Cursor = Cursors.Cross;
             BackColor = Color.Black;
             Bounds = bounds;
+
+            BuildToolbar();
+        }
+
+        private static float MonitorScale(Rectangle monitorScreen)
+        {
+            try
+            {
+                Native.POINT pt;
+                pt.X = monitorScreen.X + monitorScreen.Width / 2;
+                pt.Y = monitorScreen.Y + monitorScreen.Height / 2;
+                IntPtr mon = Native.MonitorFromPoint(pt, Native.MONITOR_DEFAULTTONEAREST);
+                uint dx, dy;
+                if (Native.GetDpiForMonitor(mon, 0, out dx, out dy) == 0 && dx > 0) return dx / 96f;
+            }
+            catch (Exception) { }
+            return 1f;
         }
 
         // Darkened copy made once, so painting never needs a slow full-screen alpha blend.
@@ -261,6 +397,155 @@ namespace ScreenshotTool
             return dst;
         }
 
+        // ---- capture bar ----------------------------------------------------------------
+
+        private void AddButton(string text, Func<bool> isOn, Action click)
+        {
+            ToolbarButton b = new ToolbarButton();
+            b.Text = text;
+            b.IsOn = isOn;
+            b.Click = click;
+            buttons.Add(b);
+        }
+
+        private void AddLabel(string text)
+        {
+            ToolbarButton b = new ToolbarButton();
+            b.Text = text;
+            b.IsLabel = true;
+            buttons.Add(b);
+        }
+
+        private void AddSeparator()
+        {
+            ToolbarButton b = new ToolbarButton();
+            b.IsSeparator = true;
+            buttons.Add(b);
+        }
+
+        private void BuildToolbar()
+        {
+            AddButton("Region", delegate { return !windowMode; }, delegate { SetWindowMode(false); });
+            AddButton("Window", delegate { return windowMode; }, delegate { SetWindowMode(true); });
+            AddButton("Monitor", null, delegate { FinishRect(monitorClient); });
+            AddButton("All monitors", null, delegate { Outcome = OverlayOutcome.AllMonitors; Close(); });
+            AddSeparator();
+            AddLabel("Delay");
+            AddButton("3s", null, delegate { FinishDelay(3); });
+            AddButton("5s", null, delegate { FinishDelay(5); });
+            AddButton("10s", null, delegate { FinishDelay(10); });
+            AddSeparator();
+            AddButton("Adjust", delegate { return Settings.Adjust; },
+                delegate { Settings.Adjust = !Settings.Adjust; Settings.Save(); });
+            AddButton("Save", delegate { return Settings.SaveFile; }, delegate { Settings.ToggleSave(); });
+            AddButton("Copy", delegate { return Settings.CopyClipboard; }, delegate { Settings.ToggleCopy(); });
+            AddSeparator();
+            AddButton("X", null, delegate { Outcome = OverlayOutcome.Cancelled; Close(); });
+
+            int pad = (int)(14 * scale);
+            int btnH = (int)(36 * scale);
+            int gap = (int)(4 * scale);
+            int outer = (int)(8 * scale);
+            int sepW = (int)(14 * scale);
+
+            int[] widths = new int[buttons.Count];
+            int total = outer * 2 - gap;
+            using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
+            {
+                for (int i = 0; i < buttons.Count; i++)
+                {
+                    ToolbarButton b = buttons[i];
+                    if (b.IsSeparator)
+                    {
+                        widths[i] = sepW;
+                    }
+                    else
+                    {
+                        int tw = (int)Math.Ceiling(g.MeasureString(b.Text, uiFont).Width);
+                        widths[i] = tw + (b.IsLabel ? pad : pad * 2);
+                        if (!b.IsLabel && widths[i] < btnH) widths[i] = btnH;
+                    }
+                    total += widths[i] + gap;
+                }
+            }
+
+            int tx = monitorClient.X + (monitorClient.Width - total) / 2;
+            if (tx < monitorClient.X) tx = monitorClient.X;
+            int ty = monitorClient.Y + (int)(16 * scale);
+            toolbarRect = new Rectangle(tx, ty, total, btnH + outer * 2);
+
+            int x = tx + outer;
+            for (int i = 0; i < buttons.Count; i++)
+            {
+                buttons[i].Rect = new Rectangle(x, ty + outer, widths[i], btnH);
+                x += widths[i] + gap;
+            }
+        }
+
+        private ToolbarButton HitButton(Point p)
+        {
+            if (!toolbarRect.Contains(p)) return null;
+            foreach (ToolbarButton b in buttons)
+            {
+                if (b.Click != null && b.Rect.Contains(p)) return b;
+            }
+            return null;
+        }
+
+        private void InvalidateToolbar()
+        {
+            Invalidate(Rectangle.Inflate(toolbarRect, 3, 3));
+        }
+
+        // ---- finishing --------------------------------------------------------------------
+
+        private void FinishRect(Rectangle r)
+        {
+            r.Intersect(new Rectangle(0, 0, shot.Width, shot.Height));
+            if (r.Width < 1 || r.Height < 1) return;
+            Outcome = OverlayOutcome.Rect;
+            Result = r;
+            Close();
+        }
+
+        private void FinishDelay(int seconds)
+        {
+            Outcome = OverlayOutcome.DelayRestart;
+            DelaySeconds = seconds;
+            RestartInWindowMode = windowMode;
+            Close();
+        }
+
+        private void Confirm()
+        {
+            if (hasSelection) FinishRect(sel);
+        }
+
+        private void SetWindowMode(bool value)
+        {
+            if (windowMode == value) return;
+            windowMode = value;
+            Settings.WindowModeLast = value;
+            Settings.Save();
+
+            Rectangle old = sel;
+            sel = Rectangle.Empty;
+            hasSelection = false;
+            dragging = false;
+            activeHandle = -1;
+            AdjustDirty(old, Rectangle.Empty);
+
+            if (windowMode)
+            {
+                Native.POINT pt;
+                Native.GetCursorPos(out pt);
+                UpdateHover(new Point(pt.X - bounds.X, pt.Y - bounds.Y));
+            }
+            InvalidateToolbar();
+        }
+
+        // ---- window / form plumbing -------------------------------------------------------
+
         protected override bool ShowWithoutActivation { get { return false; } }
 
         protected override void OnShown(EventArgs e)
@@ -273,7 +558,7 @@ namespace ScreenshotTool
             Activate();
             Focus();
 
-            if (windows != null)
+            if (windowMode)
             {
                 Native.POINT pt;
                 Native.GetCursorPos(out pt);
@@ -288,19 +573,72 @@ namespace ScreenshotTool
             base.WndProc(ref m);
         }
 
-        protected override void OnKeyDown(KeyEventArgs e)
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            if (e.KeyCode == Keys.Escape)
+            Keys key = keyData & Keys.KeyCode;
+            bool shift = (keyData & Keys.Shift) == Keys.Shift;
+            bool ctrl = (keyData & Keys.Control) == Keys.Control;
+
+            if (key == Keys.Escape)
             {
-                Result = Rectangle.Empty;
+                Outcome = OverlayOutcome.Cancelled;
                 Close();
+                return true;
             }
-            base.OnKeyDown(e);
+
+            if (hasSelection && !windowMode)
+            {
+                if (key == Keys.Enter)
+                {
+                    Confirm();
+                    return true;
+                }
+                int step = shift ? 10 : 1;
+                int dx = 0, dy = 0;
+                if (key == Keys.Left) dx = -step;
+                else if (key == Keys.Right) dx = step;
+                else if (key == Keys.Up) dy = -step;
+                else if (key == Keys.Down) dy = step;
+                if (dx != 0 || dy != 0)
+                {
+                    NudgeSelection(dx, dy, ctrl);   // Ctrl+arrows resize, arrows move
+                    return true;
+                }
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
         }
 
-        // Window mode: highlight the top-most window under the cursor.
+        private void NudgeSelection(int dx, int dy, bool resize)
+        {
+            Rectangle old = sel;
+            int W = shot.Width, H = shot.Height;
+            if (resize)
+            {
+                int w = Math.Max(1, Math.Min(W - sel.X, sel.Width + dx));
+                int h = Math.Max(1, Math.Min(H - sel.Y, sel.Height + dy));
+                sel = new Rectangle(sel.X, sel.Y, w, h);
+            }
+            else
+            {
+                int x = Clamp(sel.X + dx, 0, W - sel.Width);
+                int y = Clamp(sel.Y + dy, 0, H - sel.Height);
+                sel = new Rectangle(x, y, sel.Width, sel.Height);
+            }
+            AdjustDirty(old, sel);
+        }
+
+        private static int Clamp(int v, int lo, int hi)
+        {
+            if (v < lo) return lo;
+            if (v > hi) return hi;
+            return v;
+        }
+
+        // ---- window mode: highlight the top-most window under the cursor --------------------
+
         private void UpdateHover(Point p)
         {
+            if (windows == null || toolbarRect.Contains(p)) return;
             Rectangle found = Rectangle.Empty;
             int sx = p.X + bounds.X;
             int sy = p.Y + bounds.Y;
@@ -317,90 +655,85 @@ namespace ScreenshotTool
             {
                 Rectangle old = sel;
                 sel = found;
-                Rectangle dirty;
-                if (old.IsEmpty) dirty = found;
-                else if (found.IsEmpty) dirty = old;
-                else dirty = Rectangle.Union(old, found);
-                if (!dirty.IsEmpty)
-                {
-                    dirty.Inflate(60, 60);
-                    Invalidate(dirty);
-                }
+                AdjustDirty(old, found);
             }
         }
 
-        protected override void OnMouseDown(MouseEventArgs e)
+        // ---- selection geometry -------------------------------------------------------------
+
+        private Rectangle[] HandleRects()
         {
-            if (e.Button == MouseButtons.Right)
+            int hs = Math.Max(8, (int)(9 * scale));
+            int l = sel.Left, t = sel.Top, r = sel.Right, b = sel.Bottom;
+            int cx = (l + r) / 2, cy = (t + b) / 2;
+            int[] xs = new int[] { l, cx, r, r, r, cx, l, l };
+            int[] ys = new int[] { t, t, t, cy, b, b, b, cy };
+            Rectangle[] hr = new Rectangle[8];
+            for (int i = 0; i < 8; i++)
             {
-                Result = Rectangle.Empty;
-                Close();
-                return;
+                hr[i] = new Rectangle(xs[i] - hs / 2, ys[i] - hs / 2, hs, hs);
             }
-            if (e.Button == MouseButtons.Left)
-            {
-                if (windows != null)
-                {
-                    if (!sel.IsEmpty)
-                    {
-                        Result = sel;
-                        Close();
-                    }
-                    return;
-                }
-                dragging = true;
-                exceeded = false;
-                start = e.Location;
-                sel = Rectangle.Empty;
-            }
-            base.OnMouseDown(e);
+            return hr;
         }
 
-        protected override void OnMouseMove(MouseEventArgs e)
+        // 0 TL, 1 T, 2 TR, 3 R, 4 BR, 5 B, 6 BL, 7 L (corners are tested first)
+        private int HitHandle(Point p)
         {
-            if (windows != null)
+            Rectangle[] hr = HandleRects();
+            int slop = Math.Max(3, (int)(4 * scale));
+            int[] order = new int[] { 0, 2, 4, 6, 1, 3, 5, 7 };
+            foreach (int i in order)
             {
-                UpdateHover(e.Location);
+                Rectangle r = hr[i];
+                r.Inflate(slop, slop);
+                if (r.Contains(p)) return i;
             }
-            else if (dragging)
-            {
-                // Inside the click-tolerance zone nothing is drawn: it still counts as a click.
-                if (!exceeded && (Math.Abs(e.X - start.X) > tolerance || Math.Abs(e.Y - start.Y) > tolerance))
-                {
-                    exceeded = true;
-                }
-                if (exceeded)
-                {
-                    Rectangle old = sel;
-                    sel = MakeRect(start, e.Location);
-                    Rectangle dirty = old.IsEmpty ? sel : Rectangle.Union(old, sel);
-                    dirty.Inflate(60, 60);
-                    Invalidate(dirty);
-                }
-            }
-            base.OnMouseMove(e);
+            return -1;
         }
 
-        protected override void OnMouseUp(MouseEventArgs e)
+        private Rectangle ConfirmRect()
         {
-            if (dragging && e.Button == MouseButtons.Left)
+            int w = (int)(150 * scale), h = (int)(34 * scale), margin = (int)(10 * scale);
+            int x = sel.Right - w;
+            int y = sel.Bottom + margin;
+            if (y + h > shot.Height) y = sel.Top - h - margin;
+            if (y < 0) y = sel.Bottom - h - margin;
+            if (x + w > shot.Width) x = shot.Width - w;
+            if (x < 0) x = 0;
+            return new Rectangle(x, y, w, h);
+        }
+
+        private Rectangle ApplyDrag(Rectangle orig, int handle, int dx, int dy)
+        {
+            int W = shot.Width, H = shot.Height;
+            int l = orig.Left, t = orig.Top, r = orig.Right, b = orig.Bottom;
+            if (handle == 8)
             {
-                dragging = false;
-                if (exceeded)
-                {
-                    sel = MakeRect(start, e.Location);
-                    sel.Intersect(new Rectangle(0, 0, shot.Width, shot.Height));
-                    Result = (sel.Width >= 2 && sel.Height >= 2) ? sel : Rectangle.Empty;
-                }
-                else
-                {
-                    // A click (pointer stayed inside the tolerance zone) selects the whole monitor.
-                    Result = MonitorAt(e.Location);
-                }
-                Close();
-                return;
+                dx = Clamp(dx, -l, W - r);
+                dy = Clamp(dy, -t, H - b);
+                l += dx; r += dx; t += dy; b += dy;
             }
-            base.OnMouseUp(e);
+            else
+            {
+                switch (handle)
+                {
+                    case 0: l += dx; t += dy; break;
+                    case 1: t += dy; break;
+                    case 2: r += dx; t += dy; break;
+                    case 3: r += dx; break;
+                    case 4: r += dx; b += dy; break;
+                    case 5: b += dy; break;
+                    case 6: l += dx; b += dy; break;
+                    case 7: l += dx; break;
+                }
+                l = Clamp(l, 0, W); r = Clamp(r, 0, W);
+                t = Clamp(t, 0, H); b = Clamp(b, 0, H);
+            }
+            if (l > r) { int tmp = l; l = r; r = tmp; }
+            if (t > b) { int tmp = t; t = b; b = tmp; }
+            if (r - l < 1) r = l + 1;
+            if (b - t < 1) b = t + 1;
+            return Rectangle.FromLTRB(l, t, r, b);
         }
 
         // Bounds of the monitor under a client-area point, in bitmap pixels.
@@ -426,6 +759,224 @@ namespace ScreenshotTool
             int y = Math.Min(a.Y, b.Y);
             return new Rectangle(x, y, Math.Abs(a.X - b.X), Math.Abs(a.Y - b.Y));
         }
+
+        // Repaint only the union of two selections (plus room for handles, label and button).
+        private void AdjustDirty(Rectangle a, Rectangle b)
+        {
+            Rectangle d;
+            if (a.IsEmpty) d = b;
+            else if (b.IsEmpty) d = a;
+            else d = Rectangle.Union(a, b);
+            if (d.IsEmpty) return;
+            int pad = (int)(170 * scale);
+            d.Inflate(pad, pad);
+            Invalidate(d);
+        }
+
+        // ---- mouse --------------------------------------------------------------------------
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            Point pt = e.Location;
+
+            if (e.Button == MouseButtons.Right)
+            {
+                if (hasSelection)
+                {
+                    Rectangle old = sel;
+                    hasSelection = false;
+                    sel = Rectangle.Empty;
+                    AdjustDirty(old, Rectangle.Empty);
+                }
+                else
+                {
+                    Outcome = OverlayOutcome.Cancelled;
+                    Close();
+                }
+                return;
+            }
+            if (e.Button != MouseButtons.Left)
+            {
+                base.OnMouseDown(e);
+                return;
+            }
+
+            if (toolbarRect.Contains(pt))
+            {
+                ToolbarButton b = HitButton(pt);
+                if (b != null)
+                {
+                    b.Click();
+                    if (!IsDisposed) InvalidateToolbar();
+                }
+                return;
+            }
+
+            if (windowMode)
+            {
+                if (!sel.IsEmpty) FinishRect(sel);
+                return;
+            }
+
+            if (hasSelection)
+            {
+                if (ConfirmRect().Contains(pt))
+                {
+                    Confirm();
+                    return;
+                }
+                int h = HitHandle(pt);
+                if (h >= 0)
+                {
+                    activeHandle = h;
+                    dragOrig = sel;
+                    dragOrigPoint = pt;
+                    return;
+                }
+                if (sel.Contains(pt))
+                {
+                    activeHandle = 8;
+                    dragOrig = sel;
+                    dragOrigPoint = pt;
+                    return;
+                }
+                // click elsewhere: start over with a fresh selection
+                Rectangle prev = sel;
+                hasSelection = false;
+                sel = Rectangle.Empty;
+                AdjustDirty(prev, Rectangle.Empty);
+            }
+
+            dragging = true;
+            exceeded = false;
+            start = pt;
+            sel = Rectangle.Empty;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            Point pt = e.Location;
+
+            ToolbarButton hb = HitButton(pt);
+            if (hb != hoverButton)
+            {
+                hoverButton = hb;
+                InvalidateToolbar();
+            }
+
+            if (activeHandle >= 0)
+            {
+                Rectangle old = sel;
+                sel = ApplyDrag(dragOrig, activeHandle, pt.X - dragOrigPoint.X, pt.Y - dragOrigPoint.Y);
+                AdjustDirty(old, sel);
+            }
+            else if (dragging)
+            {
+                // Inside the click-tolerance zone nothing is drawn: it still counts as a click.
+                if (!exceeded && (Math.Abs(pt.X - start.X) > Settings.ClickTolerance
+                    || Math.Abs(pt.Y - start.Y) > Settings.ClickTolerance))
+                {
+                    exceeded = true;
+                }
+                if (exceeded)
+                {
+                    Rectangle old = sel;
+                    sel = MakeRect(start, pt);
+                    AdjustDirty(old, sel);
+                }
+            }
+            else if (windowMode)
+            {
+                UpdateHover(pt);
+            }
+
+            UpdateCursor(pt);
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left)
+            {
+                base.OnMouseUp(e);
+                return;
+            }
+            if (activeHandle >= 0)
+            {
+                activeHandle = -1;
+                return;
+            }
+            if (dragging)
+            {
+                dragging = false;
+                if (exceeded)
+                {
+                    Rectangle r = MakeRect(start, e.Location);
+                    r.Intersect(new Rectangle(0, 0, shot.Width, shot.Height));
+                    if (r.Width < 2 || r.Height < 2)
+                    {
+                        Rectangle old = sel;
+                        sel = Rectangle.Empty;
+                        AdjustDirty(old, Rectangle.Empty);
+                        return;
+                    }
+                    sel = r;
+                    if (Settings.Adjust)
+                    {
+                        hasSelection = true;
+                        AdjustDirty(sel, sel);
+                    }
+                    else
+                    {
+                        FinishRect(sel);
+                    }
+                }
+                else
+                {
+                    // A click (pointer stayed inside the tolerance zone) selects the whole monitor.
+                    FinishRect(MonitorAt(e.Location));
+                }
+                return;
+            }
+            base.OnMouseUp(e);
+        }
+
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            if (hasSelection && !windowMode && sel.Contains(e.Location) && !toolbarRect.Contains(e.Location))
+            {
+                Confirm();
+            }
+            base.OnMouseDoubleClick(e);
+        }
+
+        private void UpdateCursor(Point pt)
+        {
+            Cursor c = Cursors.Cross;
+            if (toolbarRect.Contains(pt))
+            {
+                c = (HitButton(pt) != null) ? Cursors.Hand : Cursors.Default;
+            }
+            else if (!windowMode && hasSelection)
+            {
+                if (ConfirmRect().Contains(pt))
+                {
+                    c = Cursors.Hand;
+                }
+                else
+                {
+                    int h = HitHandle(pt);
+                    if (h == 0 || h == 4) c = Cursors.SizeNWSE;
+                    else if (h == 2 || h == 6) c = Cursors.SizeNESW;
+                    else if (h == 1 || h == 5) c = Cursors.SizeNS;
+                    else if (h == 3 || h == 7) c = Cursors.SizeWE;
+                    else if (sel.Contains(pt)) c = Cursors.SizeAll;
+                }
+            }
+            if (Cursor != c) Cursor = c;
+        }
+
+        // ---- painting -----------------------------------------------------------------------
 
         protected override void OnPaintBackground(PaintEventArgs e)
         {
@@ -453,30 +1004,133 @@ namespace ScreenshotTool
                     g.DrawImage(shot, bright, bright.X, bright.Y, bright.Width, bright.Height, GraphicsUnit.Pixel);
                 }
 
-                using (Pen p = new Pen(Color.FromArgb(255, 0, 160, 255), windows != null ? 3f : 1f))
+                float bw = windowMode ? Math.Max(3f, 3f * scale) : Math.Max(1f, scale);
+                using (Pen p = new Pen(Color.FromArgb(255, 0, 160, 255), bw))
                 {
                     g.DrawRectangle(p, sel.X, sel.Y, sel.Width - 1, sel.Height - 1);
                 }
 
-                string text = sel.Width.ToString() + " x " + sel.Height.ToString();
-                SizeF ts = g.MeasureString(text, labelFont);
-                float lx = sel.X;
-                float ly = sel.Y - ts.Height - 4;
-                if (ly < 0) ly = sel.Y + 4;
-                using (SolidBrush bg = new SolidBrush(Color.FromArgb(200, 20, 20, 20)))
-                using (SolidBrush fg = new SolidBrush(Color.White))
+                if (hasSelection && !windowMode) DrawHandles(g);
+                DrawSizeLabel(g);
+                if (hasSelection && !windowMode) DrawConfirm(g);
+            }
+
+            DrawToolbar(g, clip);
+        }
+
+        private void DrawHandles(Graphics g)
+        {
+            Rectangle[] hr = HandleRects();
+            using (SolidBrush fill = new SolidBrush(Color.White))
+            using (Pen border = new Pen(Color.FromArgb(255, 0, 120, 215), 1f))
+            {
+                foreach (Rectangle r in hr)
                 {
-                    g.FillRectangle(bg, lx, ly, ts.Width + 6, ts.Height + 2);
-                    g.DrawString(text, labelFont, fg, lx + 3, ly + 1);
+                    g.FillRectangle(fill, r);
+                    g.DrawRectangle(border, r.X, r.Y, r.Width - 1, r.Height - 1);
                 }
             }
+        }
+
+        private void DrawSizeLabel(Graphics g)
+        {
+            string text = sel.Width.ToString() + " x " + sel.Height.ToString();
+            SizeF ts = g.MeasureString(text, labelFont);
+            float lx = sel.X;
+            float ly = sel.Y - ts.Height - 4 * scale;
+            if (ly < 0) ly = sel.Y + 4 * scale;
+            using (SolidBrush bg = new SolidBrush(Color.FromArgb(200, 20, 20, 20)))
+            using (SolidBrush fg = new SolidBrush(Color.White))
+            {
+                g.FillRectangle(bg, lx, ly, ts.Width + 6, ts.Height + 2);
+                g.DrawString(text, labelFont, fg, lx + 3, ly + 1);
+            }
+        }
+
+        private void DrawConfirm(Graphics g)
+        {
+            Rectangle r = ConfirmRect();
+            SmoothingMode oldSm = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath gp = RoundedRect(r, (int)(8 * scale)))
+            using (SolidBrush bg = new SolidBrush(Color.FromArgb(255, 0, 120, 215)))
+            {
+                g.FillPath(bg, gp);
+            }
+            g.SmoothingMode = oldSm;
+            g.DrawString("Capture  (Enter)", uiFont, Brushes.White, r, textFormat);
+        }
+
+        private static GraphicsPath RoundedRect(Rectangle r, int radius)
+        {
+            int d = radius * 2;
+            GraphicsPath p = new GraphicsPath();
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d - 1, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d - 1, r.Bottom - d - 1, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d - 1, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        private void DrawToolbar(Graphics g, Rectangle clip)
+        {
+            if (!toolbarRect.IntersectsWith(clip)) return;
+            SmoothingMode oldSm = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+            using (GraphicsPath gp = RoundedRect(toolbarRect, (int)(12 * scale)))
+            using (SolidBrush bg = new SolidBrush(Color.FromArgb(240, 36, 36, 36)))
+            using (Pen border = new Pen(Color.FromArgb(90, 255, 255, 255), 1f))
+            {
+                g.FillPath(bg, gp);
+                g.DrawPath(border, gp);
+            }
+
+            foreach (ToolbarButton b in buttons)
+            {
+                if (b.IsSeparator)
+                {
+                    using (Pen sp = new Pen(Color.FromArgb(90, 255, 255, 255), 1f))
+                    {
+                        int x = b.Rect.X + b.Rect.Width / 2;
+                        int m = (int)(6 * scale);
+                        g.DrawLine(sp, x, b.Rect.Y + m, x, b.Rect.Bottom - m);
+                    }
+                    continue;
+                }
+                if (b.IsLabel)
+                {
+                    using (SolidBrush lb = new SolidBrush(Color.FromArgb(255, 170, 170, 170)))
+                    {
+                        g.DrawString(b.Text, uiFont, lb, b.Rect, textFormat);
+                    }
+                    continue;
+                }
+
+                bool on = (b.IsOn != null && b.IsOn());
+                if (on || b == hoverButton)
+                {
+                    Color fillColor = on ? Color.FromArgb(255, 0, 120, 215) : Color.FromArgb(70, 255, 255, 255);
+                    using (GraphicsPath bp = RoundedRect(b.Rect, (int)(8 * scale)))
+                    using (SolidBrush fill = new SolidBrush(fillColor))
+                    {
+                        g.FillPath(fill, bp);
+                    }
+                }
+                g.DrawString(b.Text, uiFont, Brushes.White, b.Rect, textFormat);
+            }
+            g.SmoothingMode = oldSm;
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
+                uiFont.Dispose();
                 labelFont.Dispose();
+                textFormat.Dispose();
                 dimmed.Dispose();
             }
             base.Dispose(disposing);
@@ -486,12 +1140,14 @@ namespace ScreenshotTool
     // Small "saved" popup that never takes focus and makes no sound.
     class Toast : Form
     {
-        private readonly string text;
+        private string text;
+        private readonly bool autoClose;
         private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
 
-        public Toast(string message, Rectangle monitor)
+        public Toast(string message, Rectangle monitor, int autoCloseMs)
         {
             text = message;
+            autoClose = autoCloseMs > 0;
             AutoScaleMode = AutoScaleMode.None;
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
@@ -500,7 +1156,7 @@ namespace ScreenshotTool
             BackColor = Color.FromArgb(30, 30, 30);
             int w = 320, h = 56;
             Bounds = new Rectangle(monitor.Right - w - 24, monitor.Bottom - h - 64, w, h);
-            timer.Interval = 1400;
+            timer.Interval = autoClose ? autoCloseMs : 1000;
             timer.Tick += delegate { timer.Stop(); Close(); };
         }
 
@@ -520,7 +1176,14 @@ namespace ScreenshotTool
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            timer.Start();
+            if (autoClose) timer.Start();
+        }
+
+        public void SetText(string message)
+        {
+            text = message;
+            Invalidate();
+            Update();
         }
 
         protected override void WndProc(ref Message m)
@@ -548,17 +1211,13 @@ namespace ScreenshotTool
         }
     }
 
-    enum CaptureMode { Region, Monitor, Window, AllMonitors }
+    // Overlay = capture bar in the last-used mode (PrtScn); Window = capture bar in window mode (Alt+PrtScn)
+    enum CaptureMode { Overlay, Window, Monitor, AllMonitors }
 
     class TrayApp : ApplicationContext
     {
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string RunValueName = "ScreenshotTool";
-        private const string SettingsKeyPath = @"Software\ScreenshotTool";
-
-        // How far (in pixels) the pointer may move between mouse-down and mouse-up and still
-        // count as a click, i.e. "capture the whole monitor" instead of a tiny region.
-        public static int ClickTolerance = 12;
 
         private readonly NotifyIcon tray;
         private readonly Control sync;
@@ -578,42 +1237,63 @@ namespace ScreenshotTool
             saveDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Screenshots");
 
-            ClickTolerance = LoadTolerance();
+            Settings.Load();
 
             sync = new Control();
             IntPtr force = sync.Handle; // create the handle so BeginInvoke works from the hook
             GC.KeepAlive(force);
 
             ContextMenuStrip menu = new ContextMenuStrip();
-            menu.Items.Add("Capture region  (PrtScn / Win+Shift+S)", null, delegate { PostDelayed(CaptureMode.Region); });
+            menu.Items.Add("Capture bar  (PrtScn / Win+Shift+S)", null, delegate { PostDelayed(CaptureMode.Overlay); });
             menu.Items.Add("Capture this monitor  (Ctrl+PrtScn)", null, delegate { PostDelayed(CaptureMode.Monitor); });
-            menu.Items.Add("Capture a window  (Alt+PrtScn, then click one)", null, delegate { PostDelayed(CaptureMode.Window); });
+            menu.Items.Add("Capture a window  (Alt+PrtScn)", null, delegate { PostDelayed(CaptureMode.Window); });
             menu.Items.Add("Capture all monitors, same height  (Shift+PrtScn)", null, delegate { PostDelayed(CaptureMode.AllMonitors); });
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("Open screenshots folder", null, delegate { OpenFolder(); });
+
+            ToolStripMenuItem adjustItem = new ToolStripMenuItem("Adjust selection before capturing");
+            adjustItem.Click += delegate { Settings.Adjust = !Settings.Adjust; Settings.Save(); };
+            ToolStripMenuItem saveItem = new ToolStripMenuItem("Save to file");
+            saveItem.Click += delegate { Settings.ToggleSave(); };
+            ToolStripMenuItem copyItem = new ToolStripMenuItem("Copy to clipboard");
+            copyItem.Click += delegate { Settings.ToggleCopy(); };
+            menu.Items.Add(adjustItem);
+            menu.Items.Add(saveItem);
+            menu.Items.Add(copyItem);
+
             ToolStripMenuItem tolItem = new ToolStripMenuItem("Click tolerance (click = whole monitor)");
             int[] tolChoices = new int[] { 0, 5, 12, 25, 50 };
             foreach (int choice in tolChoices)
             {
                 int value = choice;
                 ToolStripMenuItem item = new ToolStripMenuItem(value == 0 ? "Off (any movement selects a region)" : value + " px");
-                item.Checked = (value == ClickTolerance);
+                item.Tag = value;
                 item.Click += delegate
                 {
-                    ClickTolerance = value;
-                    SaveTolerance(value);
-                    foreach (ToolStripMenuItem other in tolItem.DropDownItems)
-                    {
-                        other.Checked = (other == item);
-                    }
+                    Settings.ClickTolerance = value;
+                    Settings.Save();
                 };
                 tolItem.DropDownItems.Add(item);
             }
             menu.Items.Add(tolItem);
+
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Open screenshots folder", null, delegate { OpenFolder(); });
             startupItem = new ToolStripMenuItem("Start with Windows");
             startupItem.Checked = IsStartupEnabled();
             startupItem.Click += delegate { ToggleStartup(); };
             menu.Items.Add(startupItem);
+
+            // keep the check marks in sync with the settings (they can also change from the capture bar)
+            menu.Opening += delegate
+            {
+                adjustItem.Checked = Settings.Adjust;
+                saveItem.Checked = Settings.SaveFile;
+                copyItem.Checked = Settings.CopyClipboard;
+                foreach (ToolStripMenuItem t in tolItem.DropDownItems)
+                {
+                    t.Checked = ((int)t.Tag == Settings.ClickTolerance);
+                }
+            };
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Exit", null, delegate { ExitThread(); });
 
@@ -624,7 +1304,7 @@ namespace ScreenshotTool
             tray.Visible = true;
             tray.MouseClick += delegate(object s, MouseEventArgs e)
             {
-                if (e.Button == MouseButtons.Left) PostDelayed(CaptureMode.Region);
+                if (e.Button == MouseButtons.Left) PostDelayed(CaptureMode.Overlay);
             };
 
             hookProc = HookCallback;
@@ -685,7 +1365,7 @@ namespace ScreenshotTool
                             if (!swallowSKeyUp)
                             {
                                 swallowSKeyUp = true;
-                                Post(CaptureMode.Region);
+                                Post(CaptureMode.Overlay);
                             }
                             return (IntPtr)1;
                         }
@@ -698,7 +1378,7 @@ namespace ScreenshotTool
                     else if (vk == Native.VK_SNAPSHOT)
                     {
                         Log("PrtScn " + (down ? "down" : "up") + " win=" + win + " ctrl=" + ctrl + " alt=" + alt);
-                        CaptureMode mode = CaptureMode.Region;
+                        CaptureMode mode = CaptureMode.Overlay;
                         if (ctrl) mode = CaptureMode.Monitor;
                         else if (alt) mode = CaptureMode.Window;
                         else if (shift) mode = CaptureMode.AllMonitors;
@@ -802,7 +1482,21 @@ namespace ScreenshotTool
                 }
                 else
                 {
-                    result = SelectRegion(mode == CaptureMode.Window);
+                    bool windowMode = (mode == CaptureMode.Window)
+                        || (mode == CaptureMode.Overlay && Settings.WindowModeLast);
+                    for (;;)
+                    {
+                        OverlayResult o = RunOverlay(windowMode);
+                        if (o.Restart)
+                        {
+                            // "Delay" on the capture bar: close, count down, then freeze the screen again.
+                            windowMode = o.RestartWindowMode;
+                            Countdown(o.RestartDelay, toastMonitor);
+                            continue;
+                        }
+                        result = o.Image;
+                        break;
+                    }
                 }
 
                 if (result != null)
@@ -825,6 +1519,44 @@ namespace ScreenshotTool
             finally
             {
                 busy = false;
+            }
+        }
+
+        // Shows "Capturing in N..." and waits, keeping the UI responsive. The popup is gone
+        // before this returns, so it never ends up in the screenshot.
+        private static void Countdown(int seconds, Rectangle monitor)
+        {
+            Toast t = null;
+            try
+            {
+                t = new Toast("Capturing in " + seconds + "...", monitor, 0);
+                t.Show();
+                t.Refresh();
+                DateTime end = DateTime.UtcNow.AddSeconds(seconds);
+                int shown = seconds;
+                for (;;)
+                {
+                    double left = (end - DateTime.UtcNow).TotalSeconds;
+                    if (left <= 0) break;
+                    int whole = (int)Math.Ceiling(left);
+                    if (whole != shown)
+                    {
+                        shown = whole;
+                        t.SetText("Capturing in " + whole + "...");
+                    }
+                    Application.DoEvents();
+                    Thread.Sleep(20);
+                }
+            }
+            finally
+            {
+                if (t != null) t.Close();
+            }
+            DateTime until = DateTime.UtcNow.AddMilliseconds(250);
+            while (DateTime.UtcNow < until)
+            {
+                Application.DoEvents();
+                Thread.Sleep(15);
             }
         }
 
@@ -943,14 +1675,19 @@ namespace ScreenshotTool
             return list;
         }
 
-        // Every monitor captured separately at its real pixels, then placed side by side and scaled
-        // to the same height (the tallest one), so there is no black gap under a shorter monitor.
-        // A monitor that already has the target height is copied 1:1 without any resampling.
         private static Bitmap GrabAllMonitors()
         {
+            return ComposeMonitors(delegate(Rectangle r) { return Grab(r, PixelFormat.Format24bppRgb); });
+        }
+
+        // Every monitor placed side by side and scaled to the same height (the tallest one), so there
+        // is no black gap under a shorter monitor. A monitor that already has the target height is
+        // copied 1:1 without any resampling. getPart returns one monitor's pixels.
+        private static Bitmap ComposeMonitors(Func<Rectangle, Bitmap> getPart)
+        {
             List<Rectangle> mons = MonitorRects();
-            if (mons.Count == 0) return Grab(VirtualScreen(), PixelFormat.Format24bppRgb);
-            if (mons.Count == 1) return Grab(mons[0], PixelFormat.Format24bppRgb);
+            if (mons.Count == 0) return getPart(VirtualScreen());
+            if (mons.Count == 1) return getPart(mons[0]);
 
             int targetH = 0;
             foreach (Rectangle m in mons)
@@ -979,7 +1716,7 @@ namespace ScreenshotTool
                     int x = 0;
                     for (int i = 0; i < mons.Count; i++)
                     {
-                        using (Bitmap part = Grab(mons[i], PixelFormat.Format24bppRgb))
+                        using (Bitmap part = getPart(mons[i]))
                         {
                             bool sameSize = (part.Width == widths[i] && part.Height == targetH);
                             g.InterpolationMode = sameSize
@@ -1000,56 +1737,91 @@ namespace ScreenshotTool
             return canvas;
         }
 
-        private static Bitmap SelectRegion(bool pickWindow)
+        private static OverlayResult RunOverlay(bool windowMode)
         {
             Rectangle vs = VirtualScreen();
-            List<Rectangle> windows = pickWindow ? CollectWindows() : null;
-            Log("virtual screen = " + vs + (pickWindow ? ", window pick mode, windows=" + windows.Count : ""));
+            Rectangle mon = CurrentMonitor();
+            List<Rectangle> windows = CollectWindows();
+            Log("virtual screen = " + vs + ", monitor = " + mon + ", window mode = " + windowMode
+                + ", windows = " + windows.Count);
+
+            OverlayResult res = new OverlayResult();
             using (Bitmap desktop = Grab(vs, PixelFormat.Format32bppRgb))
-            using (SelectionForm form = new SelectionForm(desktop, vs, windows, ClickTolerance))
+            using (SelectionForm form = new SelectionForm(desktop, vs, windows, mon, windowMode))
             {
                 Log("grabbed desktop, showing overlay");
                 form.ShowDialog();
-                Rectangle r = form.Result;
-                Log("overlay closed, selection = " + r);
-                if (r.IsEmpty) return null;
-                return desktop.Clone(r, PixelFormat.Format24bppRgb);
+                Log("overlay closed, outcome = " + form.Outcome + ", selection = " + form.Result);
+
+                if (form.Outcome == OverlayOutcome.Rect)
+                {
+                    res.Image = desktop.Clone(form.Result, PixelFormat.Format24bppRgb);
+                }
+                else if (form.Outcome == OverlayOutcome.AllMonitors)
+                {
+                    Rectangle origin = vs;
+                    Bitmap source = desktop;
+                    res.Image = ComposeMonitors(delegate(Rectangle r)
+                    {
+                        Rectangle local = r;
+                        local.Offset(-origin.X, -origin.Y);
+                        return source.Clone(local, PixelFormat.Format24bppRgb);
+                    });
+                }
+                else if (form.Outcome == OverlayOutcome.DelayRestart)
+                {
+                    res.Restart = true;
+                    res.RestartDelay = form.DelaySeconds;
+                    res.RestartWindowMode = form.RestartInWindowMode;
+                }
             }
+            return res;
         }
 
         private void Save(Bitmap bmp, Rectangle toastMonitor)
         {
             Stopwatch sw = Stopwatch.StartNew();
-            Directory.CreateDirectory(saveDir);
-            string name = "Screenshot_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
-            string path = Path.Combine(saveDir, name);
-            bmp.Save(path, ImageFormat.Png);
-            Log("png saved in " + sw.ElapsedMilliseconds + " ms (" + bmp.Width + "x" + bmp.Height + "): " + path);
+            string path = null;
+            if (Settings.SaveFile)
+            {
+                Directory.CreateDirectory(saveDir);
+                string name = "Screenshot_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
+                path = Path.Combine(saveDir, name);
+                bmp.Save(path, ImageFormat.Png);
+                Log("png saved in " + sw.ElapsedMilliseconds + " ms (" + bmp.Width + "x" + bmp.Height + "): " + path);
+            }
 
             // Feedback first, so it feels instant; the clipboard work follows.
             try
             {
-                Toast t = new Toast("Saved  " + bmp.Width + " x " + bmp.Height, toastMonitor);
+                string verb = (path != null) ? "Saved" : "Copied";
+                Toast t = new Toast(verb + "  " + bmp.Width + " x " + bmp.Height, toastMonitor, 1400);
                 t.Show();
                 t.Refresh();
             }
             catch (Exception) { }
 
-            sw.Reset();
-            sw.Start();
-            try
+            if (Settings.CopyClipboard)
             {
-                // Image for Paint/Word/etc., file for chat apps and Explorer, so pasting
-                // into a chat sends the untouched PNG instead of a re-encoded bitmap.
-                DataObject data = new DataObject();
-                data.SetImage(bmp);
-                StringCollection files = new StringCollection();
-                files.Add(path);
-                data.SetFileDropList(files);
-                Clipboard.SetDataObject(data, true, 5, 50);
-                Log("clipboard set in " + sw.ElapsedMilliseconds + " ms");
+                sw.Reset();
+                sw.Start();
+                try
+                {
+                    // Image for Paint/Word/etc., plus the file (when saved) for chat apps and Explorer,
+                    // so pasting into a chat sends the untouched PNG instead of a re-encoded bitmap.
+                    DataObject data = new DataObject();
+                    data.SetImage(bmp);
+                    if (path != null)
+                    {
+                        StringCollection files = new StringCollection();
+                        files.Add(path);
+                        data.SetFileDropList(files);
+                    }
+                    Clipboard.SetDataObject(data, true, 5, 50);
+                    Log("clipboard set in " + sw.ElapsedMilliseconds + " ms");
+                }
+                catch (Exception) { /* clipboard can be locked by another app; the file is saved anyway */ }
             }
-            catch (Exception) { /* clipboard can be locked by another app; the file is saved anyway */ }
         }
 
         // Pre-loads the slow first-use code paths so the first real capture is not sluggish.
@@ -1059,7 +1831,7 @@ namespace ScreenshotTool
             {
                 Rectangle r = new Rectangle(0, 0, 64, 64);
                 using (Bitmap b = Grab(r, PixelFormat.Format32bppRgb))
-                using (SelectionForm f = new SelectionForm(b, r, null, 0))
+                using (SelectionForm f = new SelectionForm(b, r, new List<Rectangle>(), r, false))
                 using (Bitmap t = new Bitmap(64, 64, PixelFormat.Format32bppRgb))
                 using (Graphics g = Graphics.FromImage(t))
                 {
@@ -1077,39 +1849,6 @@ namespace ScreenshotTool
         }
 
         // ---- tray helpers -------------------------------------------------------------
-
-        private static int LoadTolerance()
-        {
-            try
-            {
-                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(SettingsKeyPath, false))
-                {
-                    if (k != null)
-                    {
-                        object v = k.GetValue("ClickTolerance");
-                        if (v is int)
-                        {
-                            int t = (int)v;
-                            if (t >= 0 && t <= 200) return t;
-                        }
-                    }
-                }
-            }
-            catch (Exception) { }
-            return 12;
-        }
-
-        private static void SaveTolerance(int value)
-        {
-            try
-            {
-                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(SettingsKeyPath))
-                {
-                    k.SetValue("ClickTolerance", value, RegistryValueKind.DWord);
-                }
-            }
-            catch (Exception) { }
-        }
 
         private void OpenFolder()
         {
