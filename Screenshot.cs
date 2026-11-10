@@ -22,6 +22,7 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -2177,6 +2178,7 @@ namespace ScreenshotTool
                 }
             };
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Check for updates", null, delegate { CheckForUpdates(); });
             string uninstaller = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Uninstall.exe");
             if (File.Exists(uninstaller))
             {
@@ -2214,6 +2216,110 @@ namespace ScreenshotTool
                 MessageBox.Show("Could not install the PrtScn hook. Use the tray icon to capture instead.",
                     "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
+        }
+
+        // ---- updates -----------------------------------------------------------------------
+
+        private const string ReleaseApi = "https://api.github.com/repos/Shin0Impact/screenshot-tool/releases/tags/latest";
+
+        // The commit this build was made from (CI embeds it); null for a local build.
+        private static string OwnBuild()
+        {
+            try
+            {
+                using (Stream st = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("BuildId"))
+                {
+                    if (st == null) return null;
+                    using (StreamReader r = new StreamReader(st)) return r.ReadToEnd().Trim();
+                }
+            }
+            catch (Exception) { return null; }
+        }
+
+        private void CheckForUpdates()
+        {
+            try { tray.ShowBalloonTip(2000, "Screenshot", "Checking for updates...", ToolTipIcon.Info); } catch (Exception) { }
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string json = null, err = null;
+                try
+                {
+                    System.Net.ServicePointManager.SecurityProtocol = (System.Net.SecurityProtocolType)3072;   // TLS 1.2
+                    System.Net.HttpWebRequest rq = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(ReleaseApi);
+                    rq.UserAgent = "ScreenshotTool";
+                    rq.Timeout = 15000;
+                    using (System.Net.WebResponse resp = rq.GetResponse())
+                    using (StreamReader sr = new StreamReader(resp.GetResponseStream()))
+                        json = sr.ReadToEnd();
+                }
+                catch (Exception ex) { err = ex.Message; }
+                sync.BeginInvoke(new Action(delegate { ShowUpdateResult(json, err); }));
+            });
+        }
+
+        private void ShowUpdateResult(string json, string err)
+        {
+            if (json == null)
+            {
+                MessageBox.Show("Could not check for updates:\r\n" + err, "Screenshot",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            Match commit = Regex.Match(json, "\"target_commitish\"\\s*:\\s*\"([0-9a-fA-F]{7,40})\"");
+            Match url = Regex.Match(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]+Screenshot-Installer\\.exe)\"");
+            string own = OwnBuild();
+            if (commit.Success && own != null && string.Equals(commit.Groups[1].Value, own, StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show("You have the latest version.", "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (!url.Success)
+            {
+                MessageBox.Show("Could not find the latest installer.", "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            string question = own == null
+                ? "This is a local build, so I can't tell if it is current. Download the latest installer?"
+                : "A newer version is available. Download the installer and update now?";
+            if (MessageBox.Show(question, "Screenshot", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+
+            string link = url.Groups[1].Value;
+            string target = Path.Combine(Path.GetTempPath(), "Screenshot-Installer.exe");
+            try { tray.ShowBalloonTip(3000, "Screenshot", "Downloading the update...", ToolTipIcon.Info); } catch (Exception) { }
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string dlErr = null;
+                try
+                {
+                    System.Net.ServicePointManager.SecurityProtocol = (System.Net.SecurityProtocolType)3072;
+                    using (System.Net.WebClient wc = new System.Net.WebClient())
+                    {
+                        wc.Headers.Add("User-Agent", "ScreenshotTool");
+                        wc.DownloadFile(link, target);
+                    }
+                }
+                catch (Exception ex) { dlErr = ex.Message; }
+                sync.BeginInvoke(new Action(delegate
+                {
+                    if (dlErr != null)
+                    {
+                        MessageBox.Show("Could not download the update:\r\n" + dlErr, "Screenshot",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    try
+                    {
+                        ProcessStartInfo psi = new ProcessStartInfo(target);
+                        psi.UseShellExecute = true;
+                        Process.Start(psi);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("Could not start the installer:\r\n" + ex.Message, "Screenshot",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                }));
+            });
         }
 
         // The menu opens with its left edge where you clicked, growing to the right and upward from the
