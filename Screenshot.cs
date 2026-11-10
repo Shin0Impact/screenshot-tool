@@ -398,6 +398,7 @@ namespace ScreenshotTool
         private bool swallowKeyUp;
         private bool swallowSKeyUp;
         private bool snapshotPassed;
+        private int modifierLogBudget = 12;
         private readonly bool[] keys = new bool[256];
         private readonly string saveDir;
         private readonly ToolStripMenuItem startupItem;
@@ -469,6 +470,13 @@ namespace ScreenshotTool
                     {
                         if (down) keys[vk] = true;
                         else if (up) keys[vk] = false;
+                    }
+                    // Debug: log the first few modifier events (never ordinary typing) to see if the hook fires.
+                    if (modifierLogBudget > 0 && (vk == Native.VK_LWIN || vk == Native.VK_RWIN
+                        || vk == 0xA0 || vk == 0xA1))
+                    {
+                        modifierLogBudget--;
+                        Log("modifier key vk=0x" + vk.ToString("X") + (down ? " down" : " up"));
                     }
                     bool win = keys[Native.VK_LWIN] || keys[Native.VK_RWIN];
                     bool shift = keys[0xA0] || keys[0xA1] || keys[Native.VK_SHIFT];
@@ -550,7 +558,7 @@ namespace ScreenshotTool
         {
             try
             {
-                File.AppendAllText(Path.Combine(Path.GetTempPath(), "screenshot-tool.log"),
+                File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshot-tool.log"),
                     DateTime.Now.ToString("HH:mm:ss.fff") + "  " + text + "\r\n");
             }
             catch (Exception) { }
