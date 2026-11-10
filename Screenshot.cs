@@ -554,6 +554,8 @@ namespace ScreenshotTool
             return Native.CallNextHookEx(hookHandle, nCode, wParam, lParam);
         }
 
+        public static void WriteLog(string text) { Log(text); }
+
         private static void Log(string text)
         {
             try
@@ -588,6 +590,7 @@ namespace ScreenshotTool
 
         private void Capture(CaptureMode mode)
         {
+            Log("Capture called, mode=" + mode + ", busy=" + busy);
             if (busy) return;
             busy = true;
             try
@@ -708,11 +711,14 @@ namespace ScreenshotTool
         private static Bitmap SelectRegion()
         {
             Rectangle vs = VirtualScreen();
+            Log("virtual screen = " + vs);
             using (Bitmap desktop = Grab(vs))
             using (SelectionForm form = new SelectionForm(desktop, vs))
             {
+                Log("grabbed desktop, showing overlay");
                 form.ShowDialog();
                 Rectangle r = form.Result;
+                Log("overlay closed, selection = " + r);
                 if (r.IsEmpty) return null;
                 return desktop.Clone(r, PixelFormat.Format24bppRgb);
             }
@@ -724,6 +730,7 @@ namespace ScreenshotTool
             string name = "Screenshot_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
             string path = Path.Combine(saveDir, name);
             bmp.Save(path, ImageFormat.Png);
+            Log("saved " + path);
 
             try
             {
@@ -847,6 +854,11 @@ namespace ScreenshotTool
             using (Mutex mutex = new Mutex(true, "Local\\ScreenshotTool_SingleInstance", out created))
             {
                 if (!created) return;
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)
+                {
+                    TrayApp.WriteLog("UI exception: " + e.Exception.ToString());
+                };
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new TrayApp());
