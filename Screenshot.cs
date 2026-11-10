@@ -124,6 +124,20 @@ namespace ScreenshotTool
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool SetForegroundWindow(IntPtr hWnd);
 
+        public const uint SRCCOPY = 0x00CC0020;
+        public const uint CAPTUREBLT = 0x40000000;
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool BitBlt(IntPtr hdcDest, int xDest, int yDest, int width, int height,
+            IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
+
         [DllImport("dwmapi.dll")]
         public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
 
@@ -603,11 +617,35 @@ namespace ScreenshotTool
         // coordinates are real device pixels on every monitor: no scaling, no resampling.
         private static Bitmap Grab(Rectangle area)
         {
+            // BitBlt directly (SRCCOPY | CAPTUREBLT) so layered windows are included.
+            // Graphics.CopyFromScreen rejects that flag combination, hence the P/Invoke.
             Bitmap bmp = new Bitmap(area.Width, area.Height, PixelFormat.Format24bppRgb);
-            using (Graphics g = Graphics.FromImage(bmp))
+            IntPtr screenDc = Native.GetDC(IntPtr.Zero);
+            try
             {
-                g.CopyFromScreen(area.X, area.Y, 0, 0, area.Size,
-                    CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    IntPtr destDc = g.GetHdc();
+                    try
+                    {
+                        bool ok = Native.BitBlt(destDc, 0, 0, area.Width, area.Height,
+                            screenDc, area.X, area.Y, Native.SRCCOPY | Native.CAPTUREBLT);
+                        if (!ok) throw new InvalidOperationException("BitBlt failed");
+                    }
+                    finally
+                    {
+                        g.ReleaseHdc(destDc);
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                bmp.Dispose();
+                throw;
+            }
+            finally
+            {
+                Native.ReleaseDC(IntPtr.Zero, screenDc);
             }
             return bmp;
         }
