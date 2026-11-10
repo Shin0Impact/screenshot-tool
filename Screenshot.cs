@@ -116,6 +116,8 @@ namespace ScreenshotTool
         public static extern uint GetCurrentThreadId();
 
         [DllImport("user32.dll", SetLastError = true)]
+        public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int maxCount);
+        [DllImport("user32.dll", SetLastError = true)]
         public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint vk);
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
@@ -2806,6 +2808,38 @@ namespace ScreenshotTool
             }));
         }
 
+        // For the ghost-overlay cases: is Windows' own snipping overlay around, and what is in front?
+        private static string SnipDiag()
+        {
+            try
+            {
+                List<string> found = new List<string>();
+                foreach (Process p in Process.GetProcesses())
+                {
+                    try
+                    {
+                        string n = p.ProcessName;
+                        if (n.IndexOf("Snip", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("ScreenClipping", StringComparison.OrdinalIgnoreCase) >= 0
+                            || n.IndexOf("ScreenSketch", StringComparison.OrdinalIgnoreCase) >= 0)
+                            found.Add(n + "(" + (p.MainWindowHandle != IntPtr.Zero ? "has window" : "no window") + ")");
+                    }
+                    catch (Exception) { }
+                    finally { p.Dispose(); }
+                }
+                string title = "";
+                try
+                {
+                    System.Text.StringBuilder sb = new System.Text.StringBuilder(128);
+                    IntPtr fg = Native.GetForegroundWindow();
+                    Native.GetWindowText(fg, sb, sb.Capacity);
+                    title = sb.ToString();
+                }
+                catch (Exception) { }
+                return "snipping processes: " + (found.Count == 0 ? "none" : string.Join(", ", found.ToArray())) + "; foreground: " + ForegroundInfo() + " \"" + title + "\"";
+            }
+            catch (Exception ex) { return "snip diag failed: " + ex.Message; }
+        }
+
         private static string ForegroundInfo()
         {
             try
@@ -2850,6 +2884,7 @@ namespace ScreenshotTool
                     {
                         // An overlay that exists but is not really on screen would swallow every press: drop it and start over.
                         Diag.Log("overlay is not on screen (handle=" + o.IsHandleCreated + " visible=" + o.Visible + " age=" + o.AgeSeconds.ToString("0.0") + " s): dropping it and starting over");
+                        Diag.Log(SnipDiag());
                         o.ForceClose();
                         busy = false;
                         openOverlay = null;
@@ -3242,6 +3277,7 @@ namespace ScreenshotTool
                     {
                         showRetries++;
                         Diag.Log("overlay window never appeared: starting it again (try " + showRetries + ")");
+                        Diag.Log(SnipDiag());
                         form.FailedToShow = true;
                         form.ForceClose();
                     }
