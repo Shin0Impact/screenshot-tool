@@ -5,6 +5,7 @@
 //   PrtScn        select a region (Win+Shift+S does the same)
 //   Ctrl+PrtScn   whole monitor the mouse is on
 //   Alt+PrtScn    pick a window (hover to highlight, click to capture)
+//   Shift+PrtScn  all monitors side by side, scaled to the same height
 //   Win+PrtScn    left alone (normal Windows behaviour)
 //
 // Every capture is a straight copy of the screen's real pixels (per-monitor DPI aware),
@@ -141,6 +142,11 @@ namespace ScreenshotTool
             IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
 
         public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        public delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
         public const int DWMWA_CLOAKED = 14;
         public const int GWL_EXSTYLE = -20;
         public const int WS_EX_TRANSPARENT = 0x00000020;
@@ -523,7 +529,7 @@ namespace ScreenshotTool
         }
     }
 
-    enum CaptureMode { Region, Monitor, Window }
+    enum CaptureMode { Region, Monitor, Window, AllMonitors }
 
     class TrayApp : ApplicationContext
     {
@@ -556,6 +562,7 @@ namespace ScreenshotTool
             menu.Items.Add("Capture region  (PrtScn / Win+Shift+S)", null, delegate { PostDelayed(CaptureMode.Region); });
             menu.Items.Add("Capture this monitor  (Ctrl+PrtScn)", null, delegate { PostDelayed(CaptureMode.Monitor); });
             menu.Items.Add("Capture a window  (Alt+PrtScn, then click one)", null, delegate { PostDelayed(CaptureMode.Window); });
+            menu.Items.Add("Capture all monitors, same height  (Shift+PrtScn)", null, delegate { PostDelayed(CaptureMode.AllMonitors); });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Open screenshots folder", null, delegate { OpenFolder(); });
             startupItem = new ToolStripMenuItem("Start with Windows");
@@ -649,6 +656,7 @@ namespace ScreenshotTool
                         CaptureMode mode = CaptureMode.Region;
                         if (ctrl) mode = CaptureMode.Monitor;
                         else if (alt) mode = CaptureMode.Window;
+                        else if (shift) mode = CaptureMode.AllMonitors;
 
                         if (down)
                         {
@@ -742,6 +750,10 @@ namespace ScreenshotTool
                 if (mode == CaptureMode.Monitor)
                 {
                     result = Grab(toastMonitor, PixelFormat.Format24bppRgb);
+                }
+                else if (mode == CaptureMode.AllMonitors)
+                {
+                    result = GrabAllMonitors();
                 }
                 else
                 {
@@ -864,6 +876,83 @@ namespace ScreenshotTool
                 Native.ReleaseDC(IntPtr.Zero, screenDc);
             }
             return bmp;
+        }
+
+        private static List<Rectangle> MonitorRects()
+        {
+            List<Rectangle> list = new List<Rectangle>();
+            Native.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero,
+                delegate(IntPtr hMon, IntPtr hdc, ref Native.RECT rc, IntPtr data)
+                {
+                    Native.MONITORINFO mi = new Native.MONITORINFO();
+                    mi.cbSize = Marshal.SizeOf(typeof(Native.MONITORINFO));
+                    if (Native.GetMonitorInfo(hMon, ref mi)) list.Add(Native.ToRectangle(mi.rcMonitor));
+                    return true;
+                }, IntPtr.Zero);
+            // left to right (then top to bottom)
+            list.Sort(delegate(Rectangle a, Rectangle b)
+            {
+                int c = a.X.CompareTo(b.X);
+                return c != 0 ? c : a.Y.CompareTo(b.Y);
+            });
+            return list;
+        }
+
+        // Every monitor captured separately at its real pixels, then placed side by side and scaled
+        // to the same height (the tallest one), so there is no black gap under a shorter monitor.
+        // A monitor that already has the target height is copied 1:1 without any resampling.
+        private static Bitmap GrabAllMonitors()
+        {
+            List<Rectangle> mons = MonitorRects();
+            if (mons.Count == 0) return Grab(VirtualScreen(), PixelFormat.Format24bppRgb);
+            if (mons.Count == 1) return Grab(mons[0], PixelFormat.Format24bppRgb);
+
+            int targetH = 0;
+            foreach (Rectangle m in mons)
+            {
+                if (m.Height > targetH) targetH = m.Height;
+            }
+
+            int[] widths = new int[mons.Count];
+            int totalW = 0;
+            for (int i = 0; i < mons.Count; i++)
+            {
+                widths[i] = (int)Math.Round(mons[i].Width * (double)targetH / mons[i].Height);
+                totalW += widths[i];
+            }
+            Log("all monitors: " + mons.Count + " monitors, output " + totalW + " x " + targetH);
+
+            Bitmap canvas = new Bitmap(totalW, targetH, PixelFormat.Format24bppRgb);
+            try
+            {
+                using (Graphics g = Graphics.FromImage(canvas))
+                using (ImageAttributes ia = new ImageAttributes())
+                {
+                    ia.SetWrapMode(WrapMode.TileFlipXY); // no blurry/dark edges when scaling
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.CompositingQuality = CompositingQuality.HighQuality;
+                    int x = 0;
+                    for (int i = 0; i < mons.Count; i++)
+                    {
+                        using (Bitmap part = Grab(mons[i], PixelFormat.Format24bppRgb))
+                        {
+                            bool sameSize = (part.Width == widths[i] && part.Height == targetH);
+                            g.InterpolationMode = sameSize
+                                ? InterpolationMode.NearestNeighbor
+                                : InterpolationMode.HighQualityBicubic;
+                            g.DrawImage(part, new Rectangle(x, 0, widths[i], targetH),
+                                0, 0, part.Width, part.Height, GraphicsUnit.Pixel, ia);
+                        }
+                        x += widths[i];
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                canvas.Dispose();
+                throw;
+            }
+            return canvas;
         }
 
         private static Bitmap SelectRegion(bool pickWindow)

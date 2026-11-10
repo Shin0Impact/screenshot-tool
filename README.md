@@ -15,6 +15,7 @@ Windows and starts `Screenshot.exe`. A blue icon appears in the tray.
 | `PrtScn` or `Win+Shift+S` | drag a region, or just click to take the whole monitor under the mouse (Esc / right-click cancels) |
 | `Ctrl+PrtScn` | whole monitor the mouse is on            |
 | `Alt+PrtScn`  | hover a window to highlight it, click to capture it |
+| `Shift+PrtScn` | all monitors side by side, scaled to the same height (no black gap) |
 | `Win+PrtScn`  | untouched, normal Windows behaviour      |
 
 While the app runs it takes over `PrtScn` and `Win+Shift+S`, so Windows' Snipping Tool no longer opens.
