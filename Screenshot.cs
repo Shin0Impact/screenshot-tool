@@ -2198,11 +2198,11 @@ namespace ScreenshotTool
             tray = new NotifyIcon();
             tray.Icon = MakeIcon();
             tray.Text = "Screenshot - PrtScn to capture";
-            tray.ContextMenuStrip = menu;
             tray.Visible = true;
             tray.MouseClick += delegate(object s, MouseEventArgs e)
             {
                 if (e.Button == MouseButtons.Left) PostDelayed(CaptureMode.Overlay);
+                else if (e.Button == MouseButtons.Right) ShowTrayMenu(menu);
             };
 
             hookProc = HookCallback;
@@ -2214,6 +2214,26 @@ namespace ScreenshotTool
                 MessageBox.Show("Could not install the PrtScn hook. Use the tray icon to capture instead.",
                     "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
+        }
+
+        // The menu opens with its left edge where you clicked, growing to the right and upward from the
+        // taskbar. It only slides left as far as needed to stay on screen.
+        private void ShowTrayMenu(ContextMenuStrip menu)
+        {
+            try
+            {
+                Native.POINT pt;
+                Native.GetCursorPos(out pt);
+                ApplyMenuTheme(menu);
+                Size sz = menu.GetPreferredSize(Size.Empty);
+                Rectangle wa = Screen.FromPoint(new Point(pt.X, pt.Y)).WorkingArea;
+                int x = Math.Max(wa.Left, Math.Min(pt.X, wa.Right - sz.Width));
+                int bottom = Math.Min(pt.Y, wa.Bottom);
+                int y = Math.Max(wa.Top, bottom - sz.Height);
+                Native.SetForegroundWindow(sync.Handle);   // so the menu closes when you click elsewhere
+                menu.Show(new Point(x, y));
+            }
+            catch (Exception) { }
         }
 
         // ---- keyboard hook -------------------------------------------------------------
