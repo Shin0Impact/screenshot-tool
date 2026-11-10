@@ -4,13 +4,14 @@
 // Hotkeys (PrtScn is taken over from Windows' Snipping Tool while this runs):
 //   PrtScn        select a region (Win+Shift+S does the same)
 //   Ctrl+PrtScn   whole monitor the mouse is on
-//   Alt+PrtScn    active window
+//   Alt+PrtScn    pick a window (hover to highlight, click to capture)
 //   Win+PrtScn    left alone (normal Windows behaviour)
 //
 // Every capture is a straight copy of the screen's real pixels (per-monitor DPI aware),
 // saved as PNG, and put on the clipboard as both an image and a file.
 
 using System;
+using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Diagnostics;
 using System.Drawing;
@@ -18,6 +19,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -138,6 +140,35 @@ namespace ScreenshotTool
         public static extern bool BitBlt(IntPtr hdcDest, int xDest, int yDest, int width, int height,
             IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
 
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        public const int DWMWA_CLOAKED = 14;
+        public const int GWL_EXSTYLE = -20;
+        public const int WS_EX_TRANSPARENT = 0x00000020;
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+        public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
+        public static extern int DwmGetWindowAttributeInt(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+
         [DllImport("dwmapi.dll")]
         public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
 
@@ -156,24 +187,28 @@ namespace ScreenshotTool
         }
     }
 
-    // Full-screen overlay used to drag out a region. It shows a frozen copy of the
-    // desktop 1:1 (one image pixel = one screen pixel) so nothing is rescaled.
+    // Full-screen overlay used to drag out a region, or (window mode) to pick a window.
+    // It shows a frozen copy of the desktop 1:1 (one image pixel = one screen pixel).
     class SelectionForm : Form
     {
         private readonly Bitmap shot;
+        private readonly Bitmap dimmed;
         private readonly Rectangle bounds;
+        private readonly List<Rectangle> windows; // null = free region mode
         private bool dragging;
         private Point start;
         private Rectangle sel = Rectangle.Empty;
-        private Rectangle lastInvalid = Rectangle.Empty;
+        private bool firstPaintLogged;
         private readonly Font labelFont = new Font("Segoe UI", 10f, FontStyle.Bold, GraphicsUnit.Point);
 
         public Rectangle Result = Rectangle.Empty; // in bitmap pixels
 
-        public SelectionForm(Bitmap desktopShot, Rectangle screenBounds)
+        public SelectionForm(Bitmap desktopShot, Rectangle screenBounds, List<Rectangle> windowRects)
         {
             shot = desktopShot;
             bounds = screenBounds;
+            windows = windowRects;
+            dimmed = MakeDimmed(desktopShot);
             AutoScaleMode = AutoScaleMode.None;
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
@@ -184,6 +219,37 @@ namespace ScreenshotTool
             Cursor = Cursors.Cross;
             BackColor = Color.Black;
             Bounds = bounds;
+        }
+
+        // Darkened copy made once, so painting never needs a slow full-screen alpha blend.
+        private static Bitmap MakeDimmed(Bitmap src)
+        {
+            int w = src.Width, h = src.Height;
+            Bitmap dst = new Bitmap(w, h, PixelFormat.Format32bppRgb);
+            Rectangle full = new Rectangle(0, 0, w, h);
+            BitmapData sd = src.LockBits(full, ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
+            BitmapData dd = dst.LockBits(full, ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+            try
+            {
+                int[] row = new int[w];
+                for (int y = 0; y < h; y++)
+                {
+                    Marshal.Copy(new IntPtr(sd.Scan0.ToInt64() + (long)y * sd.Stride), row, 0, w);
+                    for (int x = 0; x < w; x++)
+                    {
+                        int px = row[x];
+                        // ~62% brightness per channel
+                        row[x] = ((px >> 1) & 0x007F7F7F) + ((px >> 3) & 0x001F1F1F);
+                    }
+                    Marshal.Copy(row, 0, new IntPtr(dd.Scan0.ToInt64() + (long)y * dd.Stride), w);
+                }
+            }
+            finally
+            {
+                src.UnlockBits(sd);
+                dst.UnlockBits(dd);
+            }
+            return dst;
         }
 
         protected override bool ShowWithoutActivation { get { return false; } }
@@ -197,6 +263,13 @@ namespace ScreenshotTool
             Native.SetForegroundWindow(Handle);
             Activate();
             Focus();
+
+            if (windows != null)
+            {
+                Native.POINT pt;
+                Native.GetCursorPos(out pt);
+                UpdateHover(new Point(pt.X - bounds.X, pt.Y - bounds.Y));
+            }
         }
 
         protected override void WndProc(ref Message m)
@@ -216,6 +289,37 @@ namespace ScreenshotTool
             base.OnKeyDown(e);
         }
 
+        // Window mode: highlight the top-most window under the cursor.
+        private void UpdateHover(Point p)
+        {
+            Rectangle found = Rectangle.Empty;
+            int sx = p.X + bounds.X;
+            int sy = p.Y + bounds.Y;
+            foreach (Rectangle w in windows)
+            {
+                if (w.Contains(sx, sy)) { found = w; break; }
+            }
+            if (!found.IsEmpty)
+            {
+                found.Offset(-bounds.X, -bounds.Y);
+                found.Intersect(new Rectangle(0, 0, shot.Width, shot.Height));
+            }
+            if (found != sel)
+            {
+                Rectangle old = sel;
+                sel = found;
+                Rectangle dirty;
+                if (old.IsEmpty) dirty = found;
+                else if (found.IsEmpty) dirty = old;
+                else dirty = Rectangle.Union(old, found);
+                if (!dirty.IsEmpty)
+                {
+                    dirty.Inflate(60, 60);
+                    Invalidate(dirty);
+                }
+            }
+        }
+
         protected override void OnMouseDown(MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Right)
@@ -226,6 +330,15 @@ namespace ScreenshotTool
             }
             if (e.Button == MouseButtons.Left)
             {
+                if (windows != null)
+                {
+                    if (!sel.IsEmpty)
+                    {
+                        Result = sel;
+                        Close();
+                    }
+                    return;
+                }
                 dragging = true;
                 start = e.Location;
                 sel = new Rectangle(e.Location, Size.Empty);
@@ -235,7 +348,11 @@ namespace ScreenshotTool
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            if (dragging)
+            if (windows != null)
+            {
+                UpdateHover(e.Location);
+            }
+            else if (dragging)
             {
                 Rectangle old = sel;
                 sel = MakeRect(start, e.Location);
@@ -253,11 +370,29 @@ namespace ScreenshotTool
                 dragging = false;
                 sel = MakeRect(start, e.Location);
                 sel.Intersect(new Rectangle(0, 0, shot.Width, shot.Height));
-                Result = (sel.Width >= 2 && sel.Height >= 2) ? sel : Rectangle.Empty;
+                // A plain click (no real drag) selects the whole monitor under the cursor.
+                Result = (sel.Width >= 4 && sel.Height >= 4) ? sel : MonitorAt(e.Location);
                 Close();
                 return;
             }
             base.OnMouseUp(e);
+        }
+
+        // Bounds of the monitor under a client-area point, in bitmap pixels.
+        private Rectangle MonitorAt(Point clientPoint)
+        {
+            Rectangle full = new Rectangle(0, 0, shot.Width, shot.Height);
+            Native.POINT pt;
+            pt.X = clientPoint.X + bounds.X;
+            pt.Y = clientPoint.Y + bounds.Y;
+            IntPtr mon = Native.MonitorFromPoint(pt, Native.MONITOR_DEFAULTTONEAREST);
+            Native.MONITORINFO mi = new Native.MONITORINFO();
+            mi.cbSize = Marshal.SizeOf(typeof(Native.MONITORINFO));
+            if (!Native.GetMonitorInfo(mon, ref mi)) return full;
+            Rectangle r = Native.ToRectangle(mi.rcMonitor);
+            r.Offset(-bounds.X, -bounds.Y);
+            r.Intersect(full);
+            return r;
         }
 
         private static Rectangle MakeRect(Point a, Point b)
@@ -274,25 +409,26 @@ namespace ScreenshotTool
 
         protected override void OnPaint(PaintEventArgs e)
         {
+            if (!firstPaintLogged)
+            {
+                firstPaintLogged = true;
+                TrayApp.WriteLog("overlay first paint");
+            }
+
             Graphics g = e.Graphics;
             Rectangle clip = e.ClipRectangle;
             // Explicit source/dest rectangles in pixels => no DPI based scaling of the bitmap.
-            g.DrawImage(shot, clip, clip.X, clip.Y, clip.Width, clip.Height, GraphicsUnit.Pixel);
-
-            using (SolidBrush dim = new SolidBrush(Color.FromArgb(110, 0, 0, 0)))
-            {
-                GraphicsState st = g.Save();
-                if (!sel.IsEmpty && sel.Width > 0 && sel.Height > 0)
-                {
-                    g.SetClip(sel, CombineMode.Exclude);
-                }
-                g.FillRectangle(dim, clip);
-                g.Restore(st);
-            }
+            g.DrawImage(dimmed, clip, clip.X, clip.Y, clip.Width, clip.Height, GraphicsUnit.Pixel);
 
             if (sel.Width > 0 && sel.Height > 0)
             {
-                using (Pen p = new Pen(Color.FromArgb(255, 0, 160, 255), 1f))
+                Rectangle bright = Rectangle.Intersect(sel, clip);
+                if (!bright.IsEmpty)
+                {
+                    g.DrawImage(shot, bright, bright.X, bright.Y, bright.Width, bright.Height, GraphicsUnit.Pixel);
+                }
+
+                using (Pen p = new Pen(Color.FromArgb(255, 0, 160, 255), windows != null ? 3f : 1f))
                 {
                     g.DrawRectangle(p, sel.X, sel.Y, sel.Width - 1, sel.Height - 1);
                 }
@@ -313,7 +449,11 @@ namespace ScreenshotTool
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) labelFont.Dispose();
+            if (disposing)
+            {
+                labelFont.Dispose();
+                dimmed.Dispose();
+            }
             base.Dispose(disposing);
         }
     }
@@ -415,7 +555,7 @@ namespace ScreenshotTool
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.Items.Add("Capture region  (PrtScn / Win+Shift+S)", null, delegate { PostDelayed(CaptureMode.Region); });
             menu.Items.Add("Capture this monitor  (Ctrl+PrtScn)", null, delegate { PostDelayed(CaptureMode.Monitor); });
-            menu.Items.Add("Capture active window  (Alt+PrtScn)", null, delegate { PostDelayed(CaptureMode.Window); });
+            menu.Items.Add("Capture a window  (Alt+PrtScn, then click one)", null, delegate { PostDelayed(CaptureMode.Window); });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Open screenshots folder", null, delegate { OpenFolder(); });
             startupItem = new ToolStripMenuItem("Start with Windows");
@@ -443,6 +583,7 @@ namespace ScreenshotTool
                     Native.GetModuleHandle(m.ModuleName), 0);
             }
             Log("started; hook handle = " + hookHandle + ", error = " + Marshal.GetLastWin32Error());
+            sync.BeginInvoke(new Action(WarmUp));
             if (hookHandle == IntPtr.Zero)
             {
                 MessageBox.Show("Could not install the PrtScn hook. Use the tray icon to capture instead.",
@@ -600,16 +741,11 @@ namespace ScreenshotTool
 
                 if (mode == CaptureMode.Monitor)
                 {
-                    result = Grab(CurrentMonitor());
-                }
-                else if (mode == CaptureMode.Window)
-                {
-                    Rectangle w = ActiveWindowRect();
-                    if (w.Width > 0 && w.Height > 0) result = Grab(w);
+                    result = Grab(toastMonitor, PixelFormat.Format24bppRgb);
                 }
                 else
                 {
-                    result = SelectRegion();
+                    result = SelectRegion(mode == CaptureMode.Window);
                 }
 
                 if (result != null)
@@ -655,29 +791,51 @@ namespace ScreenshotTool
             return VirtualScreen();
         }
 
-        private static Rectangle ActiveWindowRect()
+        // Visible top-level windows in z-order (top first), with their real on-screen bounds.
+        private static List<Rectangle> CollectWindows()
         {
-            IntPtr h = Native.GetForegroundWindow();
-            if (h == IntPtr.Zero) return Rectangle.Empty;
-            Native.RECT r;
-            int hr = Native.DwmGetWindowAttribute(h, Native.DWMWA_EXTENDED_FRAME_BOUNDS, out r,
-                Marshal.SizeOf(typeof(Native.RECT)));
-            if (hr != 0)
+            List<Rectangle> list = new List<Rectangle>();
+            uint ownPid = (uint)Process.GetCurrentProcess().Id;
+            Native.EnumWindows(delegate(IntPtr h, IntPtr l)
             {
-                if (!Native.GetWindowRect(h, out r)) return Rectangle.Empty;
-            }
-            Rectangle rect = Native.ToRectangle(r);
-            rect.Intersect(VirtualScreen());
-            return rect;
+                if (!Native.IsWindowVisible(h) || Native.IsIconic(h)) return true;
+
+                uint pid;
+                Native.GetWindowThreadProcessId(h, out pid);
+                if (pid == ownPid) return true;
+
+                int cloaked;
+                if (Native.DwmGetWindowAttributeInt(h, Native.DWMWA_CLOAKED, out cloaked, 4) == 0 && cloaked != 0)
+                    return true;
+
+                if ((Native.GetWindowLong(h, Native.GWL_EXSTYLE) & Native.WS_EX_TRANSPARENT) != 0) return true;
+
+                StringBuilder cls = new StringBuilder(64);
+                Native.GetClassName(h, cls, 64);
+                string c = cls.ToString();
+                if (c == "Progman" || c == "WorkerW") return true;
+
+                Native.RECT r;
+                if (Native.DwmGetWindowAttribute(h, Native.DWMWA_EXTENDED_FRAME_BOUNDS, out r,
+                    Marshal.SizeOf(typeof(Native.RECT))) != 0)
+                {
+                    if (!Native.GetWindowRect(h, out r)) return true;
+                }
+                Rectangle rect = Native.ToRectangle(r);
+                if (rect.Width < 20 || rect.Height < 20) return true;
+                list.Add(rect);
+                return true;
+            }, IntPtr.Zero);
+            return list;
         }
 
         // Straight copy of screen pixels. The process is per-monitor DPI aware, so these
         // coordinates are real device pixels on every monitor: no scaling, no resampling.
-        private static Bitmap Grab(Rectangle area)
+        private static Bitmap Grab(Rectangle area, PixelFormat format)
         {
             // BitBlt directly (SRCCOPY | CAPTUREBLT) so layered windows are included.
             // Graphics.CopyFromScreen rejects that flag combination, hence the P/Invoke.
-            Bitmap bmp = new Bitmap(area.Width, area.Height, PixelFormat.Format24bppRgb);
+            Bitmap bmp = new Bitmap(area.Width, area.Height, format);
             IntPtr screenDc = Native.GetDC(IntPtr.Zero);
             try
             {
@@ -708,12 +866,13 @@ namespace ScreenshotTool
             return bmp;
         }
 
-        private static Bitmap SelectRegion()
+        private static Bitmap SelectRegion(bool pickWindow)
         {
             Rectangle vs = VirtualScreen();
-            Log("virtual screen = " + vs);
-            using (Bitmap desktop = Grab(vs))
-            using (SelectionForm form = new SelectionForm(desktop, vs))
+            List<Rectangle> windows = pickWindow ? CollectWindows() : null;
+            Log("virtual screen = " + vs + (pickWindow ? ", window pick mode, windows=" + windows.Count : ""));
+            using (Bitmap desktop = Grab(vs, PixelFormat.Format32bppRgb))
+            using (SelectionForm form = new SelectionForm(desktop, vs, windows))
             {
                 Log("grabbed desktop, showing overlay");
                 form.ShowDialog();
@@ -726,12 +885,24 @@ namespace ScreenshotTool
 
         private void Save(Bitmap bmp, Rectangle toastMonitor)
         {
+            Stopwatch sw = Stopwatch.StartNew();
             Directory.CreateDirectory(saveDir);
             string name = "Screenshot_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
             string path = Path.Combine(saveDir, name);
             bmp.Save(path, ImageFormat.Png);
-            Log("saved " + path);
+            Log("png saved in " + sw.ElapsedMilliseconds + " ms (" + bmp.Width + "x" + bmp.Height + "): " + path);
 
+            // Feedback first, so it feels instant; the clipboard work follows.
+            try
+            {
+                Toast t = new Toast("Saved  " + bmp.Width + " x " + bmp.Height, toastMonitor);
+                t.Show();
+                t.Refresh();
+            }
+            catch (Exception) { }
+
+            sw.Reset();
+            sw.Start();
             try
             {
                 // Image for Paint/Word/etc., file for chat apps and Explorer, so pasting
@@ -742,15 +913,33 @@ namespace ScreenshotTool
                 files.Add(path);
                 data.SetFileDropList(files);
                 Clipboard.SetDataObject(data, true, 5, 50);
+                Log("clipboard set in " + sw.ElapsedMilliseconds + " ms");
             }
             catch (Exception) { /* clipboard can be locked by another app; the file is saved anyway */ }
+        }
 
+        // Pre-loads the slow first-use code paths so the first real capture is not sluggish.
+        private void WarmUp()
+        {
             try
             {
-                Toast t = new Toast("Saved  " + bmp.Width + " x " + bmp.Height, toastMonitor);
-                t.Show();
+                Rectangle r = new Rectangle(0, 0, 64, 64);
+                using (Bitmap b = Grab(r, PixelFormat.Format32bppRgb))
+                using (SelectionForm f = new SelectionForm(b, r, null))
+                using (Bitmap t = new Bitmap(64, 64, PixelFormat.Format32bppRgb))
+                using (Graphics g = Graphics.FromImage(t))
+                {
+                    IntPtr h = f.Handle;
+                    GC.KeepAlive(h);
+                    g.DrawImage(b, r, 0, 0, 64, 64, GraphicsUnit.Pixel);
+                }
+                CollectWindows();
+                Log("warm-up done");
             }
-            catch (Exception) { }
+            catch (Exception ex)
+            {
+                Log("warm-up failed: " + ex.Message);
+            }
         }
 
         // ---- tray helpers -------------------------------------------------------------
