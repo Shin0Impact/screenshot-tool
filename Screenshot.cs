@@ -637,6 +637,14 @@ namespace ScreenshotTool
             }
         }
 
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            // Anything that did not go through Cancel()/Finish*() was closed from outside.
+            if (CloseReason.Length == 0 && Outcome == OverlayOutcome.Cancelled)
+                CloseReason = "external (" + e.CloseReason + ")";
+            base.OnFormClosing(e);
+        }
+
         protected override void WndProc(ref Message m)
         {
             // Ignore DPI-change resizing: the overlay must stay exactly the virtual-screen rectangle.
@@ -647,6 +655,7 @@ namespace ScreenshotTool
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             Keys key = keyData & Keys.KeyCode;
+            TrayApp.WriteLog("overlay key: " + keyData);
             bool shift = (keyData & Keys.Shift) == Keys.Shift;
             bool ctrl = (keyData & Keys.Control) == Keys.Control;
 
