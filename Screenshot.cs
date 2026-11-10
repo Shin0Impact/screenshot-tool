@@ -3050,8 +3050,10 @@ namespace ScreenshotTool
         {
             try
             {
+                // Through the shell (like a double-click): a UIAccess exe cannot be started with a plain
+                // CreateProcess call, which fails with "The requested operation requires elevation".
                 ProcessStartInfo psi = new ProcessStartInfo(InstalledExe);
-                psi.UseShellExecute = false;
+                psi.UseShellExecute = true;
                 psi.WorkingDirectory = InstallDir;
                 Process.Start(psi);
             }
