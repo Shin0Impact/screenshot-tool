@@ -205,12 +205,15 @@ namespace ScreenshotTool
         private Point start;
         private Rectangle sel = Rectangle.Empty;
         private bool firstPaintLogged;
+        private bool exceeded;      // pointer left the click-tolerance zone during this drag
+        private readonly int tolerance;
         private readonly Font labelFont = new Font("Segoe UI", 10f, FontStyle.Bold, GraphicsUnit.Point);
 
         public Rectangle Result = Rectangle.Empty; // in bitmap pixels
 
-        public SelectionForm(Bitmap desktopShot, Rectangle screenBounds, List<Rectangle> windowRects)
+        public SelectionForm(Bitmap desktopShot, Rectangle screenBounds, List<Rectangle> windowRects, int clickTolerance)
         {
+            tolerance = clickTolerance;
             shot = desktopShot;
             bounds = screenBounds;
             windows = windowRects;
@@ -346,8 +349,9 @@ namespace ScreenshotTool
                     return;
                 }
                 dragging = true;
+                exceeded = false;
                 start = e.Location;
-                sel = new Rectangle(e.Location, Size.Empty);
+                sel = Rectangle.Empty;
             }
             base.OnMouseDown(e);
         }
@@ -360,11 +364,19 @@ namespace ScreenshotTool
             }
             else if (dragging)
             {
-                Rectangle old = sel;
-                sel = MakeRect(start, e.Location);
-                Rectangle dirty = Rectangle.Union(old, sel);
-                dirty.Inflate(60, 60);
-                Invalidate(dirty);
+                // Inside the click-tolerance zone nothing is drawn: it still counts as a click.
+                if (!exceeded && (Math.Abs(e.X - start.X) > tolerance || Math.Abs(e.Y - start.Y) > tolerance))
+                {
+                    exceeded = true;
+                }
+                if (exceeded)
+                {
+                    Rectangle old = sel;
+                    sel = MakeRect(start, e.Location);
+                    Rectangle dirty = old.IsEmpty ? sel : Rectangle.Union(old, sel);
+                    dirty.Inflate(60, 60);
+                    Invalidate(dirty);
+                }
             }
             base.OnMouseMove(e);
         }
@@ -374,10 +386,17 @@ namespace ScreenshotTool
             if (dragging && e.Button == MouseButtons.Left)
             {
                 dragging = false;
-                sel = MakeRect(start, e.Location);
-                sel.Intersect(new Rectangle(0, 0, shot.Width, shot.Height));
-                // A plain click (no real drag) selects the whole monitor under the cursor.
-                Result = (sel.Width >= 4 && sel.Height >= 4) ? sel : MonitorAt(e.Location);
+                if (exceeded)
+                {
+                    sel = MakeRect(start, e.Location);
+                    sel.Intersect(new Rectangle(0, 0, shot.Width, shot.Height));
+                    Result = (sel.Width >= 2 && sel.Height >= 2) ? sel : Rectangle.Empty;
+                }
+                else
+                {
+                    // A click (pointer stayed inside the tolerance zone) selects the whole monitor.
+                    Result = MonitorAt(e.Location);
+                }
                 Close();
                 return;
             }
@@ -535,6 +554,11 @@ namespace ScreenshotTool
     {
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string RunValueName = "ScreenshotTool";
+        private const string SettingsKeyPath = @"Software\ScreenshotTool";
+
+        // How far (in pixels) the pointer may move between mouse-down and mouse-up and still
+        // count as a click, i.e. "capture the whole monitor" instead of a tiny region.
+        public static int ClickTolerance = 12;
 
         private readonly NotifyIcon tray;
         private readonly Control sync;
@@ -554,6 +578,8 @@ namespace ScreenshotTool
             saveDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Screenshots");
 
+            ClickTolerance = LoadTolerance();
+
             sync = new Control();
             IntPtr force = sync.Handle; // create the handle so BeginInvoke works from the hook
             GC.KeepAlive(force);
@@ -565,6 +591,25 @@ namespace ScreenshotTool
             menu.Items.Add("Capture all monitors, same height  (Shift+PrtScn)", null, delegate { PostDelayed(CaptureMode.AllMonitors); });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Open screenshots folder", null, delegate { OpenFolder(); });
+            ToolStripMenuItem tolItem = new ToolStripMenuItem("Click tolerance (click = whole monitor)");
+            int[] tolChoices = new int[] { 0, 5, 12, 25, 50 };
+            foreach (int choice in tolChoices)
+            {
+                int value = choice;
+                ToolStripMenuItem item = new ToolStripMenuItem(value == 0 ? "Off (any movement selects a region)" : value + " px");
+                item.Checked = (value == ClickTolerance);
+                item.Click += delegate
+                {
+                    ClickTolerance = value;
+                    SaveTolerance(value);
+                    foreach (ToolStripMenuItem other in tolItem.DropDownItems)
+                    {
+                        other.Checked = (other == item);
+                    }
+                };
+                tolItem.DropDownItems.Add(item);
+            }
+            menu.Items.Add(tolItem);
             startupItem = new ToolStripMenuItem("Start with Windows");
             startupItem.Checked = IsStartupEnabled();
             startupItem.Click += delegate { ToggleStartup(); };
@@ -961,7 +1006,7 @@ namespace ScreenshotTool
             List<Rectangle> windows = pickWindow ? CollectWindows() : null;
             Log("virtual screen = " + vs + (pickWindow ? ", window pick mode, windows=" + windows.Count : ""));
             using (Bitmap desktop = Grab(vs, PixelFormat.Format32bppRgb))
-            using (SelectionForm form = new SelectionForm(desktop, vs, windows))
+            using (SelectionForm form = new SelectionForm(desktop, vs, windows, ClickTolerance))
             {
                 Log("grabbed desktop, showing overlay");
                 form.ShowDialog();
@@ -1014,7 +1059,7 @@ namespace ScreenshotTool
             {
                 Rectangle r = new Rectangle(0, 0, 64, 64);
                 using (Bitmap b = Grab(r, PixelFormat.Format32bppRgb))
-                using (SelectionForm f = new SelectionForm(b, r, null))
+                using (SelectionForm f = new SelectionForm(b, r, null, 0))
                 using (Bitmap t = new Bitmap(64, 64, PixelFormat.Format32bppRgb))
                 using (Graphics g = Graphics.FromImage(t))
                 {
@@ -1032,6 +1077,39 @@ namespace ScreenshotTool
         }
 
         // ---- tray helpers -------------------------------------------------------------
+
+        private static int LoadTolerance()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(SettingsKeyPath, false))
+                {
+                    if (k != null)
+                    {
+                        object v = k.GetValue("ClickTolerance");
+                        if (v is int)
+                        {
+                            int t = (int)v;
+                            if (t >= 0 && t <= 200) return t;
+                        }
+                    }
+                }
+            }
+            catch (Exception) { }
+            return 12;
+        }
+
+        private static void SaveTolerance(int value)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(SettingsKeyPath))
+                {
+                    k.SetValue("ClickTolerance", value, RegistryValueKind.DWord);
+                }
+            }
+            catch (Exception) { }
+        }
 
         private void OpenFolder()
         {

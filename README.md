@@ -19,7 +19,9 @@ Windows and starts `Screenshot.exe`. A blue icon appears in the tray.
 | `Win+PrtScn`  | untouched, normal Windows behaviour      |
 
 While the app runs it takes over `PrtScn` and `Win+Shift+S`, so Windows' Snipping Tool no longer opens.
-Right-click the tray icon to open the folder, or to start with Windows.
+Right-click the tray icon to open the folder, start with Windows, or set the **click tolerance**:
+how many pixels the mouse may move during a click and still count as a click (whole monitor).
+Default is 12 px.
 
 ## Where files go
 
