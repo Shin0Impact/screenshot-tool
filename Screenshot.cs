@@ -1019,7 +1019,6 @@ namespace ScreenshotTool
         private int activeHandle = -1;             // 0-7 = resize handle, 8 = move, -1 = none
         private Rectangle dragOrig;
         private Point dragOrigPoint;
-        private bool firstPaintLogged;
 
         public OverlayOutcome Outcome = OverlayOutcome.Cancelled;
         public Rectangle Result = Rectangle.Empty;   // bitmap pixels
@@ -1298,7 +1297,6 @@ namespace ScreenshotTool
                 check.Dispose();
                 if (IsDisposed) return;
                 bool fg = (Native.GetForegroundWindow() == Handle);
-                TrayApp.WriteLog("overlay foreground = " + fg + ", visible = " + Visible);
                 if (!fg)
                 {
                     Native.SetWindowPos(Handle, Native.HWND_TOPMOST, bounds.X, bounds.Y, bounds.Width,
@@ -1327,13 +1325,10 @@ namespace ScreenshotTool
             {
                 if (e.CloseReason == System.Windows.Forms.CloseReason.None)
                 {
-                    TrayApp.WriteLog("ignored a spurious close (CloseReason.None)");
                     e.Cancel = true;
                     return;
                 }
                 CloseReason = "external (" + e.CloseReason + ")";
-                TrayApp.WriteLog("external close, dialog result = " + DialogResult + ", stack: "
-                    + Environment.StackTrace.Replace("\r\n", " | "));
             }
             base.OnFormClosing(e);
         }
@@ -1348,7 +1343,6 @@ namespace ScreenshotTool
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             Keys key = keyData & Keys.KeyCode;
-            TrayApp.WriteLog("overlay key: " + keyData);
             bool shift = (keyData & Keys.Shift) == Keys.Shift;
             bool ctrl = (keyData & Keys.Control) == Keys.Control;
 
@@ -1707,7 +1701,7 @@ namespace ScreenshotTool
                 }
                 else if (clickedAway)
                 {
-                    TrayApp.WriteLog("click outside selection: deselected only");
+                    // clicking away only deselects
                 }
                 else
                 {
@@ -1764,12 +1758,6 @@ namespace ScreenshotTool
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            if (!firstPaintLogged)
-            {
-                firstPaintLogged = true;
-                TrayApp.WriteLog("overlay first paint");
-            }
-
             Graphics g = e.Graphics;
             Rectangle clip = e.ClipRectangle;
             // Explicit source/dest rectangles in pixels => no DPI based scaling of the bitmap.
@@ -2011,14 +1999,11 @@ namespace ScreenshotTool
         private readonly Native.LowLevelKeyboardProc hookProc;
         private IntPtr hookHandle = IntPtr.Zero;
         private Thread hookThread;
-        private readonly System.Windows.Forms.Timer fgTimer = new System.Windows.Forms.Timer();
-        private uint lastFgPid;
         private uint hookThreadId;
         private bool busy;
         private bool swallowKeyUp;
         private bool swallowSKeyUp;
         private bool snapshotPassed;
-        private int modifierLogBudget = 12;
         private readonly bool[] keys = new bool[256];
         private readonly string saveDir;
         private readonly ToolStripMenuItem startupItem;
@@ -2106,13 +2091,7 @@ namespace ScreenshotTool
 
             hookProc = HookCallback;
             StartHookThread();
-            Log("started; hook handle = " + hookHandle + ", this app elevated = " + IsElevated((uint)Process.GetCurrentProcess().Id)
-                + ", uiAccess = " + HasUiAccess((uint)Process.GetCurrentProcess().Id));
-            // Log which program is in front (and whether it runs as administrator). A hook cannot see
-            // keys typed into an elevated window, which is the usual reason hotkeys "do nothing" there.
-            fgTimer.Interval = 1000;
-            fgTimer.Tick += delegate { TrackForeground(); };
-            fgTimer.Start();
+            CleanOldLogs();
             sync.BeginInvoke(new Action(WarmUp));
             if (hookHandle == IntPtr.Zero)
             {
@@ -2146,23 +2125,6 @@ namespace ScreenshotTool
             finally { Native.CloseHandle(h); }
         }
 
-        private void TrackForeground()
-        {
-            try
-            {
-                IntPtr fg = Native.GetForegroundWindow();
-                if (fg == IntPtr.Zero) return;
-                uint pid;
-                Native.GetWindowThreadProcessId(fg, out pid);
-                if (pid == lastFgPid) return;
-                lastFgPid = pid;
-                string name = "?";
-                try { using (Process fp = Process.GetProcessById((int)pid)) name = fp.ProcessName; } catch (Exception) { }
-                Log("foreground: " + name + " (pid " + pid + "), elevated = " + IsElevated(pid));
-            }
-            catch (Exception) { }
-        }
-
         // The hook lives on its own thread with its own message loop. A low-level hook that sits on
         // the UI thread is silently dropped by Windows whenever that thread is busy for too long
         // (grabbing the screen, saving a PNG, filling the clipboard), which is when Windows' own
@@ -2179,13 +2141,8 @@ namespace ScreenshotTool
                     hookHandle = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, hookProc,
                         Native.GetModuleHandle(m.ModuleName), 0);
                 }
-                int err = Marshal.GetLastWin32Error();
                 ready.Set();
-                if (hookHandle == IntPtr.Zero)
-                {
-                    Log("hook install failed, error = " + err);
-                    return;
-                }
+                if (hookHandle == IntPtr.Zero) return;
                 Native.MSG msg;
                 while (Native.GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
                 {
@@ -2220,13 +2177,6 @@ namespace ScreenshotTool
                         if (down) keys[vk] = true;
                         else if (up) keys[vk] = false;
                     }
-                    // Debug: log the first few modifier events (never ordinary typing) to see if the hook fires.
-                    if (modifierLogBudget > 0 && (vk == Native.VK_LWIN || vk == Native.VK_RWIN
-                        || vk == 0xA0 || vk == 0xA1))
-                    {
-                        modifierLogBudget--;
-                        Log("modifier key vk=0x" + vk.ToString("X") + (down ? " down" : " up"));
-                    }
                     bool win = keys[Native.VK_LWIN] || keys[Native.VK_RWIN];
                     bool shift = keys[0xA0] || keys[0xA1] || keys[Native.VK_SHIFT];
                     bool ctrl = keys[0xA2] || keys[0xA3] || keys[Native.VK_CONTROL];
@@ -2237,7 +2187,6 @@ namespace ScreenshotTool
                         // Win+Shift+S: take over Windows' own snip shortcut.
                         if (down && win && shift && !ctrl && !alt)
                         {
-                            Log("Win+Shift+S down -> capture");
                             if (!swallowSKeyUp)
                             {
                                 swallowSKeyUp = true;
@@ -2253,7 +2202,6 @@ namespace ScreenshotTool
                     }
                     else if (vk == Native.VK_SNAPSHOT)
                     {
-                        Log("PrtScn " + (down ? "down" : "up") + " win=" + win + " ctrl=" + ctrl + " alt=" + alt);
                         CaptureMode mode = CaptureMode.Overlay;
                         if (ctrl) mode = CaptureMode.Monitor;
                         else if (alt) mode = CaptureMode.Window;
@@ -2296,44 +2244,24 @@ namespace ScreenshotTool
                         }
                     }
                 }
-                catch (Exception ex)
-                {
-                    Log("hook error: " + ex.Message);
-                }
+                catch (Exception) { }
             }
             return Native.CallNextHookEx(hookHandle, nCode, wParam, lParam);
         }
 
-        public static void WriteLog(string text) { Log(text); }
-
-        private static readonly object logLock = new object();
-        private static string logPath;
-
-        // Next to the exe when that folder is writable (Program Files is not): %LOCALAPPDATA%\ScreenshotTool.
-        private static string LogPath()
+        // Older builds wrote diagnostic logs; remove any that are still lying around.
+        private static void CleanOldLogs()
         {
-            if (logPath != null) return logPath;
-            string p = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshot-tool.log");
+            try { File.Delete(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshot-tool.log")); } catch (Exception) { }
+            try { File.Delete(Path.Combine(Path.GetTempPath(), "screenshot-setup.log")); } catch (Exception) { }
             try
-            {
-                using (FileStream fs = new FileStream(p, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { }
-            }
-            catch (Exception)
             {
                 string d = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenshotTool");
-                Directory.CreateDirectory(d);
-                p = Path.Combine(d, "screenshot-tool.log");
-            }
-            logPath = p;
-            return p;
-        }
-
-        private static void Log(string text)
-        {
-            try
-            {
-                lock (logLock) File.AppendAllText(LogPath(),
-                    DateTime.Now.ToString("HH:mm:ss.fff") + "  " + text + "\r\n");
+                if (Directory.Exists(d))
+                {
+                    try { File.Delete(Path.Combine(d, "screenshot-tool.log")); } catch (Exception) { }
+                    try { Directory.Delete(d); } catch (Exception) { }
+                }
             }
             catch (Exception) { }
         }
@@ -2362,7 +2290,6 @@ namespace ScreenshotTool
 
         private void Capture(CaptureMode mode)
         {
-            Log("Capture called, mode=" + mode + ", busy=" + busy);
             if (busy)
             {
                 // Pressing the shortcut again while the overlay is open starts a fresh capture.
@@ -2425,7 +2352,6 @@ namespace ScreenshotTool
                         result.Dispose();
                     }
                     result = edited;
-                    Log("annotate " + (edited != null ? "done" : "discarded"));
                 }
 
                 if (result != null)
@@ -2438,7 +2364,6 @@ namespace ScreenshotTool
             }
             catch (Exception ex)
             {
-                Log("capture error: " + ex.ToString());
                 try
                 {
                     tray.ShowBalloonTip(3000, "Screenshot failed", ex.Message, ToolTipIcon.Error);
@@ -2656,7 +2581,6 @@ namespace ScreenshotTool
                 widths[i] = (int)Math.Round(mons[i].Width * (double)targetH / mons[i].Height);
                 totalW += widths[i];
             }
-            Log("all monitors: " + mons.Count + " monitors, output " + totalW + " x " + targetH);
 
             Bitmap canvas = new Bitmap(totalW, targetH, PixelFormat.Format24bppRgb);
             try
@@ -2696,30 +2620,13 @@ namespace ScreenshotTool
             Rectangle vs = VirtualScreen();
             Rectangle mon = CurrentMonitor();
             List<Rectangle> windows = CollectWindows();
-            Log("virtual screen = " + vs + ", monitor = " + mon + ", mode = " + startMode
-                + ", windows = " + windows.Count);
-
-            try
-            {
-                IntPtr fg = Native.GetForegroundWindow();
-                uint fpid;
-                Native.GetWindowThreadProcessId(fg, out fpid);
-                StringBuilder fcls = new StringBuilder(64);
-                Native.GetClassName(fg, fcls, 64);
-                Native.RECT fr;
-                Native.GetWindowRect(fg, out fr);
-                string pname = "?";
-                try { using (Process fp = Process.GetProcessById((int)fpid)) pname = fp.ProcessName; } catch (Exception) { }
-                Log("foreground before overlay: " + pname + " class=" + fcls + " rect=" + Native.ToRectangle(fr));
-            }
-            catch (Exception) { }
 
             // If Windows' own snipping overlay opened too, close it so ours is the only one.
             try
             {
                 foreach (Process sp in Process.GetProcessesByName("ScreenClippingHost"))
                 {
-                    try { sp.Kill(); Log("closed Windows' ScreenClippingHost"); } catch (Exception) { }
+                    try { sp.Kill(); } catch (Exception) { }
                     sp.Dispose();
                 }
             }
@@ -2729,12 +2636,9 @@ namespace ScreenshotTool
             using (Bitmap desktop = Grab(vs, PixelFormat.Format32bppRgb))
             using (SelectionForm form = new SelectionForm(desktop, vs, windows, MonitorRects(), mon, startMode))
             {
-                Log("grabbed desktop, showing overlay");
                 openOverlay = form;
                 try { form.ShowDialog(); }
                 finally { openOverlay = null; }
-                Log("overlay closed, outcome = " + form.Outcome + ", selection = " + form.Result
-                    + (form.CloseReason.Length > 0 ? ", reason = " + form.CloseReason : ""));
 
                 if (form.Outcome == OverlayOutcome.Rect)
                 {
@@ -2771,7 +2675,6 @@ namespace ScreenshotTool
                 string name = "Screenshot_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
                 path = Path.Combine(saveDir, name);
                 bmp.Save(path, ImageFormat.Png);
-                Log("png saved in " + sw.ElapsedMilliseconds + " ms (" + bmp.Width + "x" + bmp.Height + "): " + path);
             }
 
             // Feedback first, so it feels instant; the clipboard work follows.
@@ -2801,7 +2704,6 @@ namespace ScreenshotTool
                         data.SetFileDropList(files);
                     }
                     Clipboard.SetDataObject(data, true, 5, 50);
-                    Log("clipboard set in " + sw.ElapsedMilliseconds + " ms");
                 }
                 catch (Exception) { /* clipboard can be locked by another app; the file is saved anyway */ }
             }
@@ -2823,12 +2725,8 @@ namespace ScreenshotTool
                     g.DrawImage(b, r, 0, 0, 64, 64, GraphicsUnit.Pixel);
                 }
                 CollectWindows();
-                Log("warm-up done");
             }
-            catch (Exception ex)
-            {
-                Log("warm-up failed: " + ex.Message);
-            }
+            catch (Exception) { }
         }
 
         // ---- tray helpers -------------------------------------------------------------
@@ -2900,7 +2798,6 @@ namespace ScreenshotTool
                     string tmp = Path.Combine(Path.GetTempPath(), "screenshot-tool-task.xml");
                     File.WriteAllText(tmp, xml, Encoding.Unicode);
                     int rc = RunSchtasks("/Create /TN " + TaskName + " /XML \"" + tmp + "\" /F");
-                    Log("startup task create exit code = " + rc);
                     try { File.Delete(tmp); } catch (Exception) { }
                     // drop the old non-elevated Run entry, if any
                     try
@@ -2913,7 +2810,7 @@ namespace ScreenshotTool
                     catch (Exception) { }
                 }
             }
-            catch (Exception ex) { Log("startup toggle error: " + ex.Message); }
+            catch (Exception) { }
             startupItem.Checked = IsStartupEnabled();
         }
 
@@ -3221,7 +3118,8 @@ Write-Output 'OK'
             if (cmd == "--uninstall")
             {
                 int rc = RunElevated("--uninstall-elevated");
-                MessageBox.Show(rc == 0 ? "Screenshot was removed." : "Could not remove it (see " + SetupLog + ").",
+                try { File.Delete(SetupLog); } catch (Exception) { }
+                MessageBox.Show(rc == 0 ? "Screenshot was removed." : "Could not remove it.",
                     "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return false;
             }
@@ -3239,10 +3137,11 @@ Write-Output 'OK'
 
             int result = RunElevated("--install-elevated");
             if (result == -2) return true;   // permission refused: run without the setup
-            if (IsCurrent(version)) { LaunchInstalled(); return false; }
+            if (IsCurrent(version)) { try { File.Delete(SetupLog); } catch (Exception) { } LaunchInstalled(); return false; }
 
             string detail = "";
             try { detail = File.ReadAllText(SetupLog); } catch (Exception) { }
+            try { File.Delete(SetupLog); } catch (Exception) { }
             MessageBox.Show("The setup did not finish, so Screenshot will run without it this time.\r\n\r\n" + detail,
                 "Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return true;
@@ -3265,7 +3164,7 @@ Write-Output 'OK'
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
                 Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)
                 {
-                    TrayApp.WriteLog("UI exception: " + e.Exception.ToString());
+                    // swallowed: a stray UI exception must not kill the tray app
                 };
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);

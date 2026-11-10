@@ -60,8 +60,6 @@ screen's real pixels on each monitor. Nothing is resized, except when you ask fo
   Run `Screenshot.exe` as administrator too.
 - Some anti-cheat systems dislike any keyboard hook. Quit the app before playing those.
 
-`screenshot-tool.log` next to the exe records start-up and capture timings, useful for debugging.
-
 ## Hotkeys over games that run as administrator
 
 Windows does not let a normal program see keys typed into an elevated window (a game started as
@@ -81,6 +79,5 @@ only starts one that is signed with a trusted certificate and installed in Progr
 4. `Screenshot.exe --uninstall` removes the app, the startup task and the certificate.
 
 Choosing *No* at the first prompt runs the app without the setup: everything works except over
-administrator windows. The installed app's log is in `%LOCALAPPDATA%\ScreenshotTool` (the Program
-Files folder is read-only); the setup's own output is in `%TEMP%\screenshot-setup.log`.
+administrator windows. The app writes no logs.
 `build.bat` makes a plain build with no setup step, for development.
