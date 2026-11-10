@@ -3264,6 +3264,15 @@ Write-Output 'OK'
             if (data == null) return true;   // built without the embedded app (build.bat): run directly
             string version = VersionOf(data);
             string cmd = args.Length > 0 ? args[0] : "";
+            bool asUninstaller = string.Equals(Path.GetFileName(Application.ExecutablePath), "Uninstall.exe", StringComparison.OrdinalIgnoreCase);
+            if (asUninstaller && cmd == "")
+            {
+                // Double-clicked "Uninstall.exe": that always means uninstall.
+                Application.EnableVisualStyles();
+                if (MessageBox.Show("Remove Screenshot from this computer?", "Screenshot",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return false;
+                cmd = "--uninstall";
+            }
             int parent = 0;
             if (args.Length > 1) int.TryParse(args[1], out parent);
 
