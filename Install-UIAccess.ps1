@@ -21,17 +21,15 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$self = $MyInvocation.MyCommand.Path
+$self = $PSCommandPath
+if (-not $self) { $self = $MyInvocation.MyCommand.Path }
 $here = Split-Path -Parent $self
+$logFile = Join-Path $here 'Install-UIAccess.log'
 
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$self`"")
-    if ($Exe) { $argList += @('-Exe', "`"$Exe`"") }
-    if ($Uninstall) { $argList += '-Uninstall' }
-    Start-Process powershell -Verb RunAs -ArgumentList $argList
-    exit
+function Log([string]$text) {
+    $line = '{0:HH:mm:ss}  {1}' -f (Get-Date), $text
+    Write-Host $line
+    try { Add-Content -Path $logFile -Value $line } catch { }
 }
 
 $subject = 'CN=Screenshot Tool (local)'
@@ -40,6 +38,19 @@ $target  = Join-Path $dir 'Screenshot.exe'
 $task    = 'ScreenshotTool'
 
 try {
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    Log "start, admin = $isAdmin, script = $self"
+
+    if (-not $isAdmin) {
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $self + '"'))
+        if ($Exe) { $argList += @('-Exe', ('"' + $Exe + '"')) }
+        if ($Uninstall) { $argList += '-Uninstall' }
+        Log 'asking for administrator rights (a new window will open)'
+        Start-Process powershell -Verb RunAs -ArgumentList $argList
+        return
+    }
+
     Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'Screenshot*' } |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 600
@@ -50,7 +61,7 @@ try {
         foreach ($store in 'Cert:\LocalMachine\My', 'Cert:\LocalMachine\Root', 'Cert:\LocalMachine\TrustedPublisher') {
             Get-ChildItem $store | Where-Object { $_.Subject -eq $subject } | Remove-Item -Force
         }
-        Write-Host 'Removed.' -ForegroundColor Green
+        Log 'Removed.'
         return
     }
 
@@ -62,11 +73,13 @@ try {
     if (-not $Exe -or -not (Test-Path $Exe)) {
         throw 'Could not find Screenshot-UIAccess*.exe next to this script (or pass -Exe <path>).'
     }
+    Log "using $Exe"
 
     # 1. a local code-signing certificate, trusted on this machine only
     $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object {
         $_.Subject -eq $subject -and $_.NotAfter -gt (Get-Date).AddDays(30) } | Select-Object -First 1
     if (-not $cert) {
+        Log 'creating the local certificate'
         $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject `
             -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddYears(10) `
             -KeyExportPolicy NonExportable
@@ -76,11 +89,13 @@ try {
     Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
     Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
     Remove-Item $cer -Force
+    Log 'certificate trusted'
 
     # 2. install to the protected folder and sign
     New-Item -ItemType Directory -Force $dir | Out-Null
     Copy-Item $Exe $target -Force
     $sig = Set-AuthenticodeSignature -FilePath $target -Certificate $cert -HashAlgorithm SHA256
+    Log "signature status: $($sig.Status) $($sig.StatusMessage)"
     if ($sig.Status -ne 'Valid') { throw "Signing failed: $($sig.Status) $($sig.StatusMessage)" }
 
     # 3. start at logon as a NORMAL (not elevated) program
@@ -92,16 +107,19 @@ try {
         -Principal (New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited) `
         -Settings  (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
                         -ExecutionTimeLimit ([TimeSpan]::Zero)) | Out-Null
+    Log 'startup task registered'
     Start-ScheduledTask -TaskName $task
-
-    Write-Host ''
-    Write-Host 'Installed and started.' -ForegroundColor Green
-    Write-Host "  program : $target"
-    Write-Host "  log     : $env:LOCALAPPDATA\ScreenshotTool\screenshot-tool.log"
-    Write-Host '  The first log line should say: elevated = 0, uiAccess = 1'
+    Start-Sleep -Seconds 2
+    $running = Get-Process -Name 'Screenshot' -ErrorAction SilentlyContinue
+    if ($running) { Log 'Installed and running.' } else { Log 'Installed, but the app is not running yet - check the log below.' }
+    Log "program: $target"
+    Log "app log: $env:LOCALAPPDATA\ScreenshotTool\screenshot-tool.log (first line should say elevated = 0, uiAccess = 1)"
 }
 catch {
-    Write-Host ''
-    Write-Host "Failed: $($_.Exception.Message)" -ForegroundColor Red
+    Log "FAILED: $($_.Exception.Message)"
+    Log ($_ | Out-String)
 }
-Read-Host 'Press Enter to close'
+finally {
+    Log "full log: $logFile"
+    Read-Host 'Press Enter to close'
+}
