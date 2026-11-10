@@ -2664,6 +2664,13 @@ namespace ScreenshotTool
                     bool shift = keys[0xA0] || keys[0xA1] || keys[Native.VK_SHIFT];
                     bool ctrl = keys[0xA2] || keys[0xA3] || keys[Native.VK_CONTROL];
                     bool alt = keys[0xA4] || keys[0xA5] || keys[Native.VK_MENU];
+                    if (vk == 0x53 || vk == 0x1B || vk == 0x2C || vk == 0x5B || vk == 0x5C || vk == 0x10 || vk == 0xA0 || vk == 0xA1
+                        || vk == 0x11 || vk == 0xA2 || vk == 0xA3 || vk == 0x12 || vk == 0xA4 || vk == 0xA5)
+                    {
+                        string line = "key " + vk.ToString("X2") + (down ? " down" : " up") + (((int)k.flags & 0x10) != 0 ? " injected" : "")
+                            + " [win=" + win + " shift=" + shift + " ctrl=" + ctrl + " alt=" + alt + " swallowS=" + swallowSKeyUp + "]";
+                        ThreadPool.QueueUserWorkItem(delegate { Diag.Log(line); });
+                    }
 
                     if (vk == Native.VK_S)
                     {
@@ -3159,10 +3166,11 @@ namespace ScreenshotTool
             {
                 Diag.Log("overlay prepared in " + ov.ElapsedMilliseconds + " ms (" + windows.Count + " windows), showing");
                 openOverlay = form;
+                SelectionForm shownForm = form;
                 form.Shown += delegate
                 {
-                    // presses that came in while this overlay was being prepared are served by it: it is already fresh
-                    if (pendingPresses > 0) { Diag.Log("presses folded into this overlay: " + pendingPresses); pendingPresses = 0; }
+                    // every press closes the overlay and opens a fresh one, so each queued press does one more cycle
+                    if (pendingPresses > 0) { pendingPresses--; Diag.Log("queued press taken: " + pendingPresses + " left"); shownForm.RestartFresh(); }
                 };
                 try { form.ShowDialog(); }
                 finally { openOverlay = null; }
