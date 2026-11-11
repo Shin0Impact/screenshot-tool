@@ -1,6 +1,5 @@
 @echo off
-rem Builds Screenshot.exe with the C# compiler that is already part of Windows.
-rem Nothing to install, no third-party code.
+rem Builds Screenshot.exe with the C# compiler that ships with Windows.
 setlocal
 cd /d "%~dp0"
 
@@ -12,12 +11,12 @@ if not exist "%CSC%" (
   exit /b 1
 )
 
-rem Stop a running copy so the exe can be overwritten.
+rem Close a running copy so the exe can be overwritten.
 taskkill /f /im Screenshot.exe >nul 2>&1
 
 "%CSC%" /nologo /optimize+ /target:winexe /out:Screenshot.exe /win32manifest:app.manifest ^
   /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll ^
-  Screenshot.cs
+  src\*.cs
 if errorlevel 1 (
   echo.
   echo Build failed.

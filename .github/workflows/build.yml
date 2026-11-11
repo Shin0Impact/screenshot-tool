@@ -24,7 +24,7 @@ jobs:
           "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /optimize+ /define:UIA
           /target:winexe /out:Screenshot-UIAccess.exe /win32manifest:app.uiaccess.manifest /resource:build.txt,BuildId
           /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll
-          Screenshot.cs
+          src\*.cs
 
       - name: Compile the standard build (installed when administrator support is not wanted)
         shell: cmd
@@ -32,7 +32,7 @@ jobs:
           "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /optimize+ /define:UIA
           /target:winexe /out:Screenshot-Standard.exe /win32manifest:app.manifest /resource:build.txt,BuildId
           /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll
-          Screenshot.cs
+          src\*.cs
 
       - name: Compile Screenshot-Installer.exe (launcher with both builds embedded)
         shell: cmd
@@ -42,7 +42,7 @@ jobs:
           /resource:Screenshot-UIAccess.exe,UIAccessBuild.exe
           /resource:Screenshot-Standard.exe,StandardBuild.exe
           /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll
-          Screenshot.cs
+          src\*.cs
 
       - uses: actions/upload-artifact@v4
         with:

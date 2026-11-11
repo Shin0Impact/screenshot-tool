@@ -1,85 +1,77 @@
 # Screenshot
 
-Tiny Windows tray app for native-quality screenshots on mixed-resolution monitors.
-One C# file, no dependencies, no installer, no sound.
+A small Windows tray app for screenshots at full resolution on monitors with different sizes.
+C#, no dependencies, no sound.
 
-## Build and run
+## Build
 
-Double-click `build.bat`, or grab `Screenshot-Installer.exe` from the **latest** release (built by GitHub Actions).
-A neutral icon appears in the tray (white on a dark taskbar, dark on a light one). The capture bar follows the Windows light/dark setting.
+Run `build.bat` (uses the C# compiler that comes with Windows), or take `Screenshot-Installer.exe`
+from the latest release, which GitHub Actions builds from every push to `main`.
+The source is in `src/`.
 
-## Hotkeys
+## Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `PrtScn` or `Win+Shift+S` | opens the **capture bar** (below) in the mode you used last |
+| `PrtScn` or `Win+Shift+S` | capture bar, in the mode you used last |
 | `Alt+PrtScn` | capture bar in window mode |
-| `Ctrl+PrtScn` | open the capture bar in Monitor mode: hover a monitor, click to capture it (with *Follow mouse* on: captures the monitor under the mouse instantly) |
-| `Shift+PrtScn` | instantly capture all monitors side by side, scaled to the same height (no black gap) |
-| `Win+PrtScn` | untouched, normal Windows behaviour |
+| `Ctrl+PrtScn` | capture bar in monitor mode (with *Follow mouse* on, captures the monitor under the mouse right away) |
+| `Shift+PrtScn` | all monitors side by side, scaled to the same height |
+| `Win+PrtScn` | left to Windows |
 
-While the app runs it takes over `PrtScn` and `Win+Shift+S`, so Windows' Snipping Tool no longer opens.
+While it runs, the app takes over `PrtScn` and `Win+Shift+S`, so Snipping Tool does not open.
+Pressing a shortcut while the bar is open closes it and opens a new one.
 
 ## Capture bar
 
-The screen freezes and a bar appears at the top, like Snipping Tool.
+The screen freezes and a bar slides in at the top.
 
-- **Region**: drag a rectangle. A plain click (no drag) takes the whole monitor under the mouse.
-- **Window**: hover a window to highlight it, click to capture it (works on any monitor, focused or not).
-- **Monitor**: hover a monitor to highlight it, click to capture it (pick the left or right one, regardless of where you started). **All monitors**: captures immediately.
-- Clicking outside an existing selection only deselects it; it no longer captures the whole monitor.
-- **Edit** (off by default): after you draw a region it stays adjustable (handles, arrow keys, `Enter`), and after capturing an editor opens with pen, arrow, box, highlight and text, six colours, four sizes and undo. `Enter` keeps the result, `Esc` discards it.
-- **Follow mouse** (off by default, tray menu only): Monitor and Window capture (the bar buttons, `Ctrl+PrtScn` and `Alt+PrtScn`) take the monitor or window under the mouse straight away instead of asking you to pick one.
-- Pressing the shortcut again while the bar is open closes it and opens a fresh one.
-- With **Edit** on, after drawing a region you can drag its handles, drag inside to move it,
-  nudge with the arrow keys (Shift = 10 px, Ctrl+arrows = resize), then press **Enter**, double-click, or click *Capture*.
-  With it off, the region is captured as soon as you release the mouse.
-- **Save** / **Copy** (toggles): write a PNG file and/or put the shot on the clipboard. At least one stays on.
-- `Esc` closes. Right-click clears the selection, or closes if there is none.
+- **Region**: drag a rectangle. A click without dragging takes the monitor under the mouse.
+- **Window**: hover to highlight a window, click to capture it.
+- **Monitor**: hover to highlight a monitor, click to capture it.
+- **All monitors**: captures right away.
+- **Edit** (off by default): the region stays adjustable after you draw it (handles, arrow keys, `Enter`),
+  and after the capture an editor opens with pen, arrow, box, highlight and text.
+  `Enter` keeps the result, `Esc` discards it.
+- **Follow mouse** (off by default, tray menu): monitor and window captures use whatever is under the
+  mouse instead of asking you to pick.
+- **Save** and **Copy**: write a PNG and/or copy the shot to the clipboard. One of them stays on.
+- `Esc` closes. Right-click clears the selection, or closes the bar if there is none.
 
-All toggles are remembered. They are also in the tray menu, together with the **click tolerance**
-(how many pixels the mouse may move during a click and still count as a click; default 12 px).
+With Edit on, drag the handles to resize, drag inside to move, nudge with the arrow keys
+(Shift = 10 px, Ctrl+arrows = resize), then press `Enter`, double-click, or click *Capture*.
 
-## Where files go
+Settings are remembered. They are also in the tray menu, along with the click tolerance
+(how far the mouse can move during a click, default 12 px).
 
-`Pictures\Screenshots\Screenshot_<date>_<time>.png`
+## Files
 
-With *Copy* on, the clipboard gets the image **and** the file, so pasting into a chat or Explorer sends
-the original PNG instead of a re-encoded copy.
+Shots go to `Pictures\Screenshots\Screenshot_<date>_<time>.png`. With Copy on, the clipboard gets
+the image and the file, so pasting into a chat or Explorer sends the original PNG.
 
-## Why quality holds up
-
-The app is per-monitor DPI aware (see `app.manifest`), so every capture is a 1:1 copy of the
-screen's real pixels on each monitor. Nothing is resized, except when you ask for
-*All monitors*, where the shorter monitor is scaled up to match the taller one.
+The app is per-monitor DPI aware (`app.manifest`), so each capture is a 1:1 copy of the screen's
+pixels. Nothing is resized except in *All monitors*, where shorter monitors are scaled up.
 
 ## Limits
 
-- Games in **exclusive fullscreen** can come out black. Use borderless windowed.
-- If the foreground app runs **as administrator**, Windows hides the key from a normal app.
-  Run `Screenshot.exe` as administrator too.
-- Some anti-cheat systems dislike any keyboard hook. Quit the app before playing those.
+- Exclusive-fullscreen games can come out black. Use borderless windowed.
+- Windows hides keys typed into an administrator window from a normal app. Use the administrator
+  install below, or run `Screenshot.exe` as administrator.
+- Some anti-cheat software dislikes keyboard hooks. Quit the app before those games.
+- A debug log is kept in `%LOCALAPPDATA%\ScreenshotTool` for now. It only records shortcut keys.
 
-## Hotkeys over games that run as administrator
+## Installer
 
-Windows does not let a normal program see keys typed into an elevated window (a game started as
-administrator, Task Manager, ...), so ordinary hotkeys do nothing there and Windows' own Snipping
-Tool opens instead. A "UIAccess" program is allowed to, without being elevated itself, but Windows
-only starts one that is signed with a trusted certificate and installed in Program Files.
+Windows only lets a UIAccess program see keys typed into administrator windows (a game started as
+administrator, Task Manager). That needs a signed build in Program Files, which `Screenshot-Installer.exe` sets up.
+Double-click it and pick one:
 
-`Screenshot-Installer.exe` takes care of that by itself. Double-click it and choose:
+- **With administrator support** (default): one permission prompt, creates a local self-signed
+  certificate (trusted on this PC, used only for this app), installs a signed copy into
+  `C:\Program Files\ScreenshotTool` and starts it at logon, not elevated.
+- **Without administrator support**: no prompt, installs the normal build into a folder you choose
+  (default `%LOCALAPPDATA%\Programs\ScreenshotTool`). Hotkeys do not work over administrator windows.
 
-- **With administrator support** (default): asks Windows for permission once, creates a local
-  self-signed certificate (trusted on this PC, only used for this app), installs a signed copy to a
-  folder inside Program Files (default `C:\Program Files\ScreenshotTool`) and starts it at logon,
-  not elevated.
-- **Without administrator support**: no permission prompt; installs the ordinary build to a folder
-  you choose (default `%LOCALAPPDATA%\Programs\ScreenshotTool`). Hotkeys then do not work over
-  programs that run as administrator.
-
-The install folder is a text box with a Browse... button. Running the installer again offers to add
-administrator support (for a standard install), remove it (for an administrator install), update, start or uninstall. To remove it you can also use
-Settings > Apps > "Screenshot", the tray menu's "Uninstall...", or `Uninstall.exe` in the install folder.
-It removes the app, the startup entry and (for the administrator install) the certificate. The app writes
-no logs.
-`build.bat` makes a plain build with no setup step, for development.
+Run the installer again to add or remove administrator support, update, start or uninstall.
+You can also uninstall from Settings > Apps, the tray menu, or `Uninstall.exe` in the install folder.
+Uninstalling removes the app, the startup entry and (for the administrator install) the certificate.
