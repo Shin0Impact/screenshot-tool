@@ -3,6 +3,15 @@
 Tiny Windows tray app for native-quality screenshots on mixed-resolution monitors.
 One C# file, no dependencies, no installer, no sound.
 
+## At a glance
+
+| | |
+|---|---|
+| **What** | Windows tray app for native-quality screenshots on mixed-resolution monitors |
+| **Stack** | C# (WinForms) in a single file with direct Win32 calls; no dependencies |
+| **Design** | Every capture is a straight copy of the screen's real pixels and is per-monitor DPI aware |
+| **Build** | GitHub Actions builds `Screenshot-Installer.exe` and attaches it to the latest release |
+
 ## Build and run
 
 Double-click `build.bat`, or grab `Screenshot-Installer.exe` from the **latest** release (built by GitHub Actions).
