@@ -98,8 +98,6 @@ namespace ScreenshotTool
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
         [DllImport("user32.dll", SetLastError = true)]
-        public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
-        [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
 
         [DllImport("user32.dll", SetLastError = true)]

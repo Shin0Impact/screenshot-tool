@@ -47,18 +47,32 @@ namespace ScreenshotTool
             catch (Exception ex) { Diag.Log("backup hotkeys failed: " + ex.Message); }
         }
 
-        // Windows drops a hook that was ever too slow. Send an unassigned key and reinstall the hook if it is not seen.
+        // Windows drops a hook that was ever too slow. Watch the physical PrtScn / Win+Shift+S state and
+        // reinstall the hook if it never saw the key. Nothing is sent to other programs.
         private int hookEvents;
-        private void CheckHook()
+        private int lastHookTick;
+        private void HookWatch()
+        {
+            for (;;)
+            {
+                Thread.Sleep(50);
+                bool down = Native.IsDown(0x2C)
+                    || (Native.IsDown(0x53) && (Native.IsDown(0x5B) || Native.IsDown(0x5C)) && Native.IsDown(0x10));
+                if (!down) continue;
+                int seen = Environment.TickCount;
+                if (seen - lastHookTick <= 150) { Thread.Sleep(500); continue; }
+                Thread.Sleep(300);
+                if (lastHookTick - seen >= 0) { Thread.Sleep(500); continue; }
+                Diag.Log("keyboard hook stopped receiving keys: installing it again");
+                RestartHook();
+                Thread.Sleep(1000);
+            }
+        }
+
+        private void RestartHook()
         {
             try
             {
-                int before = hookEvents;
-                Native.keybd_event(0xE8, 0, 0, UIntPtr.Zero);
-                Native.keybd_event(0xE8, 0, 2, UIntPtr.Zero);
-                Thread.Sleep(400);
-                if (hookEvents != before) return;
-                Diag.Log("keyboard hook stopped receiving keys: installing it again");
                 if (hookThreadId != 0) Native.PostThreadMessage(hookThreadId, 0x0012, IntPtr.Zero, IntPtr.Zero);   // WM_QUIT
                 Thread old = hookThread;
                 if (old != null) old.Join(1000);
@@ -66,7 +80,7 @@ namespace ScreenshotTool
                 swallowSKeyUp = false;
                 StartHookThread();
             }
-            catch (Exception ex) { Diag.Log("hook check failed: " + ex.Message); }
+            catch (Exception ex) { Diag.Log("hook restart failed: " + ex.Message); }
         }
 
         // Restarts the app if the UI thread stops answering.
@@ -75,7 +89,6 @@ namespace ScreenshotTool
             for (;;)
             {
                 Thread.Sleep(4000);
-                CheckHook();
                 ManualResetEvent answered = new ManualResetEvent(false);
                 Stopwatch lat = Stopwatch.StartNew();
                 try { sync.BeginInvoke(new Action(delegate { answered.Set(); })); }
@@ -159,7 +172,7 @@ namespace ScreenshotTool
         {
             if (nCode >= 0)
             {
-                hookEvents++;
+                hookEvents++; lastHookTick = Environment.TickCount;
                 try
                 {
                     Native.KBDLLHOOKSTRUCT k = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(

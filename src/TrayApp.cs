@@ -137,6 +137,9 @@ namespace ScreenshotTool
             Thread wd = new Thread(Watchdog);
             wd.IsBackground = true;
             wd.Start();
+            Thread hw = new Thread(HookWatch);
+            hw.IsBackground = true;
+            hw.Start();
             sync.BeginInvoke(new Action(WarmUp));
             if (hookHandle == IntPtr.Zero)
             {
